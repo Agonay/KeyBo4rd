@@ -23,7 +23,8 @@ Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> einkDisplay(GxEPD2_154_D67(CS_PIN, DC_PIN, RES_PIN, BUSY_PIN));
 
 // ---------- idle mode tracking ----------
-static MenuIdleMode currentIdleMode = IdleTotoro; // sentinel: force first render
+static MenuIdleMode currentIdleMode = (MenuIdleMode)255; // sentinel: force first render
+static bool einkInitialized = false;
 static bool oledNeedsRedraw = true;
 static uint8_t lastOledBrt = 100;
 static bool lastCapsOn = false;
@@ -31,7 +32,7 @@ static int lastBatPct = -1;
 static bool lastBleConn = false;
 
 static unsigned long lastIdleRenderMs = 0;
-static const unsigned long idleCooldownMs = 120000; // 2 min between full redraws
+static const unsigned long idleCooldownMs = 300000; // 5 min between full redraws (e-ink is slow)
 
 void initDisplay() {
   delay(1000);
@@ -47,7 +48,7 @@ void initDisplay() {
   oled.drawFastHLine(0, 19, oled.width(), SSD1306_WHITE);
   oled.display();
 
-  // E-Ink boot: show Totoro
+  // E-Ink boot: show Totoro, then hibernate
   einkDisplay.init(115200, true, 50, false);
   einkDisplay.setRotation(0);
   einkDisplay.setFullWindow();
@@ -60,6 +61,7 @@ void initDisplay() {
   } while (einkDisplay.nextPage());
   einkDisplay.hibernate();
 
+  einkInitialized = true;
   currentIdleMode = IdleTotoro;
   lastOledBrt     = getSettings().oledBrightness;
 }
@@ -199,117 +201,6 @@ void demoFourStatesRow(int y) {
   drawBattery24x8(x0 + 90, y, 5);
 }
 
-// ---------- E-Ink idle screen ----------
-static inline int roundDown8(int v) { return v & ~7; }
-static inline int roundUp8(int v)   { return (v + 7) & ~7; }
-
-static void drawBackground() {
-  einkDisplay.fillScreen(GxEPD_WHITE);
-  int w = einkDisplay.width(), h = einkDisplay.height();
-  einkDisplay.drawLine(0, h - 40, w, h - 40, GxEPD_BLACK);
-  einkDisplay.fillRect(w - 70, 0, 70, h, GxEPD_BLACK);
-  einkDisplay.fillCircle(w - 70, h - 40, 60, GxEPD_WHITE);
-  for (int i = 0; i < 8; i++) {
-    int x = w / 2 - 20 + i * 5;
-    einkDisplay.fillRect(x, h - 28 + (i % 2), 4, 3, GxEPD_BLACK);
-  }
-}
-
-struct Drop { int x, y, len; };
-static void stepRain(Drop *drops, int count, int w, int h) {
-  for (int i = 0; i < count; i++) {
-    drops[i].y += 5;
-    drops[i].x -= 1;
-    if (drops[i].y > h) {
-      drops[i].y = -(random(10, 50));
-      drops[i].x = random(0, w);
-      drops[i].len = random(6, 12);
-    }
-  }
-}
-
-static void drawRainPartial(Drop *drops, int count) {
-  const int w = einkDisplay.width(), h = einkDisplay.height();
-  int minx = w, miny = h, maxx = 0, maxy = 0;
-  for (int i = 0; i < count; i++) {
-    int x0 = drops[i].x, y0 = drops[i].y;
-    int x1 = x0 - 2, y1 = y0 + drops[i].len;
-    if (x0 < minx) minx = x0; if (x1 < minx) minx = x1;
-    if (y0 < miny) miny = y0; if (y1 < miny) miny = y1;
-    if (x0 > maxx) maxx = x0; if (x1 > maxx) maxx = x1;
-    if (y0 > maxy) maxy = y0; if (y1 > maxy) maxy = y1;
-  }
-  minx = max(0, roundDown8(minx - 2));
-  maxx = min(w, roundUp8(maxx + 2));
-  miny = max(0, miny - 2);
-  maxy = min(h, maxy + 2);
-  int ww = maxx - minx;
-  int hh = maxy - miny;
-  if (ww <= 0 || hh <= 0) return;
-  einkDisplay.setPartialWindow(minx, miny, ww, hh);
-  einkDisplay.firstPage();
-  do {
-    einkDisplay.fillRect(minx, miny, ww, hh, GxEPD_WHITE);
-    for (int i = 0; i < count; i++) {
-      int x0 = drops[i].x, y0 = drops[i].y;
-      int x1 = x0 - 2, y1 = y0 + drops[i].len;
-      einkDisplay.drawLine(x0, y0, x1, y1, GxEPD_BLACK);
-    }
-  } while (einkDisplay.nextPage());
-}
-
-static void drawFireFrame(int x, int y, int frameIndex) {
-  const int fw = FIRE_W, fh = FIRE_H;
-  int bx = x - fw / 2;
-  int by = y - fh;
-  int winX = roundDown8(bx - 1);
-  int winW = roundUp8(bx + fw + 1) - winX;
-  int winY = by - 1;
-  int winH = fh + 2;
-  einkDisplay.setPartialWindow(winX, winY, winW, winH);
-  einkDisplay.firstPage();
-  do {
-    einkDisplay.fillRect(bx - 1, by - 1, fw + 2, fh + 2, GxEPD_WHITE);
-    const uint8_t *bmp = (const uint8_t *)pgm_read_ptr(&FIRE_FRAMES[frameIndex]);
-    einkDisplay.drawBitmap(bx, by, bmp, fw, fh, GxEPD_BLACK);
-  } while (einkDisplay.nextPage());
-}
-
-void einkAnimateCampfireRain(uint32_t duration_ms) {
-  const bool fast = einkDisplay.epd2.hasFastPartialUpdate;
-  einkDisplay.setFullWindow();
-  einkDisplay.firstPage(); do { drawBackground(); } while (einkDisplay.nextPage());
-
-  const int W = einkDisplay.width(), H = einkDisplay.height();
-  const int N_DROPS = 18;
-  Drop drops[N_DROPS];
-  for (int i = 0; i < N_DROPS; i++) {
-    drops[i].x = random(0, W);
-    drops[i].y = random(-H, 0);
-    drops[i].len = random(6, 12);
-  }
-  const int fireX = W / 2;
-  const int fireY = H - 30;
-
-  uint32_t endMs = millis() + duration_ms;
-  int frame = 0, framesSinceClean = 0;
-  const int CLEAN_EVERY = 40;
-
-  while ((int32_t)(millis() - endMs) < 0) {
-    stepRain(drops, N_DROPS, W, H);
-    drawRainPartial(drops, N_DROPS);
-    drawFireFrame(fireX, fireY, frame);
-    frame = (frame + 1) % FIRE_NFRAMES;
-    if (++framesSinceClean >= CLEAN_EVERY) {
-      framesSinceClean = 0;
-      einkDisplay.setFullWindow();
-      einkDisplay.firstPage(); do { drawBackground(); } while (einkDisplay.nextPage());
-    }
-    delay(fast ? 120 : 250);
-  }
-  einkDisplay.hibernate();
-}
-
 // ---------- E-Ink status dashboard ----------
 void drawEinkStatusDashboard() {
   einkDisplay.init(115200, true, 50, false);
@@ -348,15 +239,35 @@ void drawEinkStatusDashboard() {
   einkDisplay.hibernate();
 }
 
+// ---------- E-Ink idle screen ----------
+
 static void drawRainIdleScreen() {
-  einkDisplay.setRotation(0);
+  // static rain scene — single full update, no animation
   einkDisplay.setFullWindow();
   einkDisplay.firstPage();
   do {
     einkDisplay.fillScreen(GxEPD_WHITE);
     einkDisplay.setTextSize(1);
     einkDisplay.setTextColor(GxEPD_BLACK);
-    einkDisplay.setCursor(10, 100);
+
+    // ground line
+    int w = einkDisplay.width(), h = einkDisplay.height();
+    einkDisplay.drawLine(0, h - 40, w, h - 40, GxEPD_BLACK);
+
+    // cloud
+    einkDisplay.fillRoundRect(40, 10, 120, 30, 10, GxEPD_BLACK);
+    einkDisplay.fillRoundRect(60, 0, 80, 20, 10, GxEPD_BLACK);
+
+    // rain drops
+    randomSeed(42);
+    for (int i = 0; i < 40; i++) {
+      int rx = random(10, w - 80);
+      int ry = random(50, h - 50);
+      int rl = random(6, 14);
+      einkDisplay.drawLine(rx, ry, rx - 2, ry + rl, GxEPD_BLACK);
+    }
+
+    einkDisplay.setCursor(60, h - 25);
     einkDisplay.print(F("Rainy day"));
   } while (einkDisplay.nextPage());
 }
@@ -364,12 +275,16 @@ static void drawRainIdleScreen() {
 void renderIdleScreen() {
   MenuIdleMode mode = getSettings().einkIdleMode;
   if (mode == currentIdleMode) return;
+
   unsigned long now = millis();
   if (now - lastIdleRenderMs < idleCooldownMs) return;
 
   currentIdleMode = mode;
   lastIdleRenderMs = now;
 
+  if (!einkInitialized) return; // still booting
+
+  // wake from hibernate, draw, sleep again
   einkDisplay.init(115200, true, 50, false);
   switch (mode) {
     case IdleTotoro: {
@@ -386,7 +301,7 @@ void renderIdleScreen() {
     }
     case IdleStatus:
       drawEinkStatusDashboard();
-      return;
+      return; // already hibernates
     case IdleAnimation:
       drawRainIdleScreen();
       break;
