@@ -13,12 +13,6 @@ const int numRows = 6;
 const int numColsPCF = 13;
 
 // ---------- Layout table (Spanish ES on ANSI physical) ----------
-// Row 0: F-keys + Escape (13 keys)
-// Row 1: º 1-0 ' ¡ (13 keys)
-// Row 2: Tab Q-P ´ + (13 keys)
-// Row 3: Caps A-L Ñ ´ Enter (13 keys)
-// Row 4: Shift Z-M , . - Shift ↑ (13 keys)
-// Row 5: Ctrl Win Alt Space AltGr \ ← ↓ → \ Backspace Delete (13 keys)
 const Key keyboardLayout[numRows][numColsPCF] = {
   // Row 0 — Function row
   {Key_Escape, Key_F1, Key_F2, Key_F3, Key_F4, Key_F5, Key_F6,
@@ -55,15 +49,18 @@ const uint8_t colPinsPCF[numColsPCF] = {
   P15, P13, P4, P1, P3, P7, P5, P6, P11, P0, P2, P14, P12
 };
 
-const unsigned long debounceDelay = 100;
+const unsigned long debounceDelay = 10;
 const unsigned long initialRepeatDelay = 500;
 const unsigned long repeatRate = 80;
 
 unsigned long lastScanTime = 0;
-const unsigned long scanInterval = 10;
+const unsigned long scanInterval = 8;
 
 // Safety: force-release any key held > 2 s
 const unsigned long maxHoldTimeMs = 2000;
+
+// Track last key activity for display guards
+volatile unsigned long lastKeyActivityTime = 0;
 
 void initKeyboardMatrix() {
   for (int i = 0; i < numColsPCF; i++) {
@@ -98,30 +95,50 @@ void scanKeyboardMatrix() {
     delayMicroseconds(15);
 
     for (int row = 0; row < numRows; row++) {
-      bool pressed = (digitalRead(rowPins[row]) == LOW);
+      bool rawPressed = (digitalRead(rowPins[row]) == LOW);
 
-      if (pressed) {
-        if (!keyStates[row][col].isPressed) {
-          // Fresh press
-          keyStates[row][col].isPressed = true;
-          keyStates[row][col].firstPressTime = currentTime;
-          keyStates[row][col].lastRepeatTime = currentTime;
+      KeyState &ks = keyStates[row][col];
 
-          Serial.printf("Key pressed row=%d col=%d shift=%d alt=%d\n",
-            row, col, shiftPressed, altPressed);
+      // Debounce: only act if state has been stable for debounceDelay
+      if (rawPressed != ks.lastRawState) {
+        ks.lastRawState = rawPressed;
+        ks.stateChangeTime = currentTime;
+        continue;
+      }
+      if (currentTime - ks.stateChangeTime < debounceDelay) {
+        continue;
+      }
 
+      if (rawPressed) {
+        if (!ks.isPressed) {
+          // Fresh press — debounce confirmed
+          ks.isPressed = true;
+          ks.firstPressTime = currentTime;
+          ks.lastRepeatTime = currentTime;
+          ks.wasSent = false;
+
+          lastKeyActivityTime = currentTime;
           sendKeyPress(row, col, shiftPressed, altPressed);
-        } else if (currentTime - keyStates[row][col].firstPressTime >= initialRepeatDelay) {
+          ks.wasSent = true;
+        } else {
           // Auto-repeat
-          if (currentTime - keyStates[row][col].lastRepeatTime >= repeatRate) {
-            keyStates[row][col].lastRepeatTime = currentTime;
-            sendKeyPress(row, col, shiftPressed, altPressed);
+          if (currentTime - ks.firstPressTime >= initialRepeatDelay) {
+            if (currentTime - ks.lastRepeatTime >= repeatRate) {
+              ks.lastRepeatTime = currentTime;
+
+              lastKeyActivityTime = currentTime;
+              sendKeyPress(row, col, shiftPressed, altPressed);
+              ks.wasSent = true;
+            }
           }
         }
       } else {
-        if (keyStates[row][col].isPressed) {
-          keyStates[row][col].isPressed = false;
+        if (ks.isPressed) {
+          // Release
+          ks.isPressed = false;
+          ks.wasSent = false;
           releaseKey(row, col);
+          lastKeyActivityTime = currentTime;
         }
       }
     }
@@ -135,8 +152,7 @@ void scanKeyboardMatrix() {
           (currentTime - keyStates[row][col].firstPressTime > maxHoldTimeMs)) {
         keyStates[row][col].isPressed = false;
         releaseKey(row, col);
-        Serial.printf("Force release row=%d col=%d (held >%lu ms)\n",
-          row, col, maxHoldTimeMs);
+        lastKeyActivityTime = currentTime;
       }
     }
   }
@@ -171,4 +187,8 @@ void releaseKey(int row, int col) {
   if (key.normalKey) bleKeyboard.release(key.normalKey);
   if (key.shiftKey)  bleKeyboard.release(key.shiftKey);
   if (key.altKey)    bleKeyboard.release(key.altKey);
+}
+
+unsigned long getLastKeyActivityTime() {
+  return lastKeyActivityTime;
 }

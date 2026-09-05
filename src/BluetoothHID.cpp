@@ -25,6 +25,7 @@ static bool s_wasConnected = false;
   };
 #else
   #include <BLECharacteristic.h>
+  #include <BLEUtils.h>
   class MyBleKeyboard : public BleKeyboard {
   public:
     MyBleKeyboard() : BleKeyboard() {}
@@ -40,6 +41,13 @@ static bool s_wasConnected = false;
         Serial.printf("[BLE] CapsLock: %s\n", (leds & 0x02) ? "ON" : "OFF");
       }
     }
+
+    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
+      BleKeyboard::onConnect(pServer);
+      // Request aggressive connection intervals for lower latency
+      // min_int=6 (7.5ms), max_int=12 (15ms), latency=0, timeout=50 (500ms)
+      pServer->updateConnParams(param->connect.remote_bda, 6, 12, 0, 50);
+    }
   };
 #endif
 
@@ -47,6 +55,7 @@ static MyBleKeyboard keyboard("K3YBo4rd", "AgonaySS", 100);
 BleKeyboard& bleKeyboard = keyboard;
 
 void initBluetooth() {
+  bleKeyboard.setDelay(1);  // reduce inter-send delay from 7ms to 1ms
   bleKeyboard.begin();
   s_wasConnected = false;
 }

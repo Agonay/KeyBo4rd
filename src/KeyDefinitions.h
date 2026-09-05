@@ -13,8 +13,11 @@ struct Key {
 
 struct KeyState {
   bool isPressed;
+  bool lastRawState;
+  unsigned long stateChangeTime;
   unsigned long firstPressTime;
   unsigned long lastRepeatTime;
+  bool wasSent;
 };
 
 // ---------- Alphabet Keys ----------

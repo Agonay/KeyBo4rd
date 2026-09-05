@@ -3,6 +3,7 @@
 #include "BatteryManager.h"
 #include "BluetoothHID.h"
 #include "MenuManager.h"
+#include "KeyboardMatrix.h"
 #include <GxEPD2_BW.h>
 #include "totoro_200x200_1b.h"
 #include "ship16.h"
@@ -207,7 +208,7 @@ void demoFourStatesRow(int y) {
 }
 
 // ---------- E-Ink runtime clock ----------
-static void drawEinkClock() {
+void drawEinkClock() {
   einkDisplay.init(115200, true, 50, false);
   einkDisplay.setRotation(0);
   einkDisplay.setFullWindow();
@@ -314,6 +315,10 @@ static void drawRainIdleScreen() {
 
 void renderIdleScreen() {
   if (isMenuOpen()) return; // don't draw e-ink while OLED menu is active
+
+  // Guard: skip E-Ink if user was typing in the last 3 seconds
+  unsigned long sinceKey = millis() - getLastKeyActivityTime();
+  if (sinceKey < 3000 && getLastKeyActivityTime() > 0) return;
 
   MenuIdleMode mode = getSettings().einkIdleMode;
   if (mode == currentIdleMode) return;
