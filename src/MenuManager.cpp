@@ -56,6 +56,7 @@ static void rowValue(int idx, char *buf, int sz) {
         case IdleTotoro:    snprintf(buf, sz, "Totoro"); break;
         case IdleStatus:    snprintf(buf, sz, "Status"); break;
         case IdleAnimation: snprintf(buf, sz, "Animation"); break;
+        case IdleClock:     snprintf(buf, sz, "Clock"); break;
         default:            snprintf(buf, sz, "?"); break;
       }
       break;
@@ -105,6 +106,60 @@ static bool needsRender = false;
 static int  lastHighlight = -1;
 
 static void markDirty() { needsRender = true; }
+
+// ---------- OLED drawing ----------
+void menuDrawOled() {
+  char buf[20];
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+
+  // header
+  oled.setCursor(2, 1);
+  oled.print(F("MENU"));
+  oled.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
+  // 6 rows: rows 0..5, each 8px tall, starting at y=12
+  int y = 12;
+  int lineH = 8;
+  for (int i = 0; i < MENU_ROW_COUNT; i++) {
+    rowValue(i, buf, sizeof(buf));
+    bool hl = (i == highlight);
+
+    // abbreviated label for OLED
+    const char *shortLabel;
+    switch (i) {
+      case 0: shortLabel = "Knob steps"; break;
+      case 1: shortLabel = "Direction";   break;
+      case 2: shortLabel = "OLED brt";    break;
+      case 3: shortLabel = "Idle screen"; break;
+      case 4: shortLabel = "Battery";     break;
+      case 5: shortLabel = "Low bat %";   break;
+      default: shortLabel = rowLabels[i]; break;
+    }
+
+    if (hl) {
+      oled.fillRect(0, y, 128, lineH, SSD1306_WHITE);
+      oled.setTextColor(SSD1306_BLACK);
+    }
+
+    // compact layout: "Label: value"
+    char line[22];
+    snprintf(line, sizeof(line), "%-11s%s", shortLabel, buf);
+    oled.setCursor(2, y + 1);
+    oled.print(line);
+
+    oled.setTextColor(SSD1306_WHITE);
+    y += lineH;
+  }
+
+  // footer
+  oled.drawFastHLine(0, 60, 128, SSD1306_WHITE);
+  oled.setCursor(2, 61);
+  oled.print(F("S=chg L=back"));
+
+  oled.display();
+}
 
 // ---------- e-ink drawing ----------
 void menuDrawEink() {
@@ -201,7 +256,7 @@ void menuRotate(int dir) {
 void menuRenderIfChanged() {
   if (!menuOpen_) { needsRender = false; return; }
   if (!needsRender && highlight == lastHighlight) return;
-  menuDrawEink();
+  menuDrawOled();
   lastHighlight = highlight;
   needsRender = false;
 }

@@ -26,6 +26,7 @@ GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> einkDisplay(GxEPD2_154_D67(CS_
 static MenuIdleMode currentIdleMode = (MenuIdleMode)255; // sentinel: force first render
 static bool einkInitialized = false;
 static bool oledNeedsRedraw = true;
+static bool menuWasOpen = false;
 static uint8_t lastOledBrt = 100;
 static bool lastCapsOn = false;
 static int lastBatPct = -1;
@@ -62,7 +63,7 @@ void initDisplay() {
   einkDisplay.hibernate();
 
   einkInitialized = true;
-  currentIdleMode = IdleTotoro;
+  currentIdleMode = (MenuIdleMode)255; // sentinel: force first renderIdleScreen call
   lastOledBrt     = getSettings().oledBrightness;
 }
 
@@ -78,6 +79,10 @@ static void oledClearLine() {
 }
 
 void oledDrawStatusLine() {
+  bool nowOpen = isMenuOpen();
+  if (nowOpen) { menuWasOpen = true; return; }
+  if (menuWasOpen) { oledNeedsRedraw = true; lastBatPct = -1; lastCapsOn = !lastCapsOn; lastBleConn = !lastBleConn; menuWasOpen = false; }
+
   KbdSettings &s = getSettings();
   if (!s.showBattery && !oledNeedsRedraw) return;
 
@@ -201,6 +206,41 @@ void demoFourStatesRow(int y) {
   drawBattery24x8(x0 + 90, y, 5);
 }
 
+// ---------- E-Ink runtime clock ----------
+static void drawEinkClock() {
+  einkDisplay.init(115200, true, 50, false);
+  einkDisplay.setRotation(0);
+  einkDisplay.setFullWindow();
+  einkDisplay.firstPage();
+  do {
+    einkDisplay.fillScreen(GxEPD_WHITE);
+    einkDisplay.setTextSize(1);
+    einkDisplay.setTextColor(GxEPD_BLACK);
+
+    unsigned long s = millis() / 1000;
+    char buf[20];
+    snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu",
+      s / 3600, (s % 3600) / 60, s % 60);
+
+    // center the clock text
+    int16_t x1, y1;
+    uint16_t w, h;
+    einkDisplay.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
+    int x = (einkDisplay.width() - w) / 2;
+    int y = (einkDisplay.height() - h) / 2 - y1;
+
+    einkDisplay.setTextSize(2);
+    einkDisplay.setCursor(x, y);
+    einkDisplay.print(buf);
+
+    einkDisplay.setTextSize(1);
+    einkDisplay.setCursor(10, einkDisplay.height() - 10);
+    einkDisplay.print(F("Runtime (HH:MM:SS)"));
+
+  } while (einkDisplay.nextPage());
+  einkDisplay.hibernate();
+}
+
 // ---------- E-Ink status dashboard ----------
 void drawEinkStatusDashboard() {
   einkDisplay.init(115200, true, 50, false);
@@ -273,6 +313,8 @@ static void drawRainIdleScreen() {
 }
 
 void renderIdleScreen() {
+  if (isMenuOpen()) return; // don't draw e-ink while OLED menu is active
+
   MenuIdleMode mode = getSettings().einkIdleMode;
   if (mode == currentIdleMode) return;
 
@@ -304,6 +346,9 @@ void renderIdleScreen() {
       return; // already hibernates
     case IdleAnimation:
       drawRainIdleScreen();
+      break;
+    case IdleClock:
+      drawEinkClock();
       break;
     default:
       break;

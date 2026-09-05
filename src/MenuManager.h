@@ -8,6 +8,7 @@ enum MenuIdleMode {
   IdleTotoro,
   IdleStatus,
   IdleAnimation,
+  IdleClock,
   IdleCount
 };
 
@@ -45,6 +46,7 @@ int menuHighlightIndex();
 
 // Draw the current menu screen (call from DisplayManager)
 void menuDrawEink();
+void menuDrawOled();
 
 // Only redraw if state changed; call from loop
 void menuRenderIfChanged();

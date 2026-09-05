@@ -116,6 +116,9 @@ void handleRotaryEncoder() {
         case BTN_SHORT:
           if (bleKeyboard.isConnected()) {
             bleKeyboard.write(KEY_MEDIA_PLAY_PAUSE);
+            Serial.println(F("[BTN] media key sent"));
+          } else {
+            Serial.println(F("[BTN] BLE not connected"));
           }
           break;
         case BTN_VERYLONG:
