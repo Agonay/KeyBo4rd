@@ -15,17 +15,19 @@
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 #define OLED_ADDR 0x3C
 
-// E-Ink
+// E-Ink — WeAct 1.54" B&W (GDEH0154D67, SSD1681)
+// Pinout matches WeAct Studio breakout board
 #define CS_PIN   5
-#define BUSY_PIN 15
-#define RES_PIN  17
-#define DC_PIN   16
+#define BUSY_PIN 4
+#define RES_PIN  16
+#define DC_PIN   17
 
 GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> einkDisplay(GxEPD2_154_D67(CS_PIN, DC_PIN, RES_PIN, BUSY_PIN));
 
 // ---------- idle mode tracking ----------
 static MenuIdleMode currentIdleMode = (MenuIdleMode)255; // sentinel: force first render
 static bool einkInitialized = false;
+static bool einkIsAwake = false;
 static bool oledNeedsRedraw = true;
 static bool menuWasOpen = false;
 static uint8_t lastOledBrt = 100;
@@ -35,6 +37,24 @@ static bool lastBleConn = false;
 
 static unsigned long lastIdleRenderMs = 0;
 static const unsigned long idleCooldownMs = 300000; // 5 min between full redraws (e-ink is slow)
+
+// Clock state: only redraw when second changes
+static unsigned long lastDrawnSecond = 0;
+static bool clockNeedsUpdate = false;
+
+static void einkWake() {
+  if (!einkIsAwake && einkInitialized) {
+    einkDisplay.init(115200, true, 50, false);
+    einkIsAwake = true;
+  }
+}
+
+static void einkSleep() {
+  if (einkIsAwake) {
+    einkDisplay.hibernate();
+    einkIsAwake = false;
+  }
+}
 
 void initDisplay() {
   delay(1000);
@@ -64,8 +84,10 @@ void initDisplay() {
   einkDisplay.hibernate();
 
   einkInitialized = true;
+  einkIsAwake = false;
   currentIdleMode = (MenuIdleMode)255; // sentinel: force first renderIdleScreen call
   lastOledBrt     = getSettings().oledBrightness;
+  lastDrawnSecond = 0;
 }
 
 // ---------- OLED helpers ----------
@@ -208,8 +230,15 @@ void demoFourStatesRow(int y) {
 }
 
 // ---------- E-Ink runtime clock ----------
-void drawEinkClock() {
-  einkDisplay.init(115200, true, 50, false);
+// Called from loop — only draws when second changes, wakes/sleeps display
+static void drawEinkClockIfNeeded() {
+  if (!einkInitialized) return;
+
+  unsigned long nowSec = millis() / 1000;
+  if (nowSec == lastDrawnSecond) return; // nothing changed
+  lastDrawnSecond = nowSec;
+
+  einkWake();
   einkDisplay.setRotation(0);
   einkDisplay.setFullWindow();
   einkDisplay.firstPage();
@@ -218,12 +247,10 @@ void drawEinkClock() {
     einkDisplay.setTextSize(1);
     einkDisplay.setTextColor(GxEPD_BLACK);
 
-    unsigned long s = millis() / 1000;
     char buf[20];
     snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu",
-      s / 3600, (s % 3600) / 60, s % 60);
+      nowSec / 3600, (nowSec % 3600) / 60, nowSec % 60);
 
-    // center the clock text
     int16_t x1, y1;
     uint16_t w, h;
     einkDisplay.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
@@ -239,12 +266,13 @@ void drawEinkClock() {
     einkDisplay.print(F("Runtime (HH:MM:SS)"));
 
   } while (einkDisplay.nextPage());
-  einkDisplay.hibernate();
+  einkSleep();
 }
 
 // ---------- E-Ink status dashboard ----------
-void drawEinkStatusDashboard() {
-  einkDisplay.init(115200, true, 50, false);
+static void drawEinkStatusDashboard() {
+  if (!einkInitialized) return;
+  einkWake();
   einkDisplay.setRotation(0);
   einkDisplay.setFullWindow();
   einkDisplay.firstPage();
@@ -277,13 +305,14 @@ void drawEinkStatusDashboard() {
     einkDisplay.setCursor(10, y); einkDisplay.print(buf);
 
   } while (einkDisplay.nextPage());
-  einkDisplay.hibernate();
+  einkSleep();
 }
 
 // ---------- E-Ink idle screen ----------
 
 static void drawRainIdleScreen() {
-  // static rain scene — single full update, no animation
+  if (!einkInitialized) return;
+  einkWake();
   einkDisplay.setFullWindow();
   einkDisplay.firstPage();
   do {
@@ -291,15 +320,12 @@ static void drawRainIdleScreen() {
     einkDisplay.setTextSize(1);
     einkDisplay.setTextColor(GxEPD_BLACK);
 
-    // ground line
     int w = einkDisplay.width(), h = einkDisplay.height();
     einkDisplay.drawLine(0, h - 40, w, h - 40, GxEPD_BLACK);
 
-    // cloud
     einkDisplay.fillRoundRect(40, 10, 120, 30, 10, GxEPD_BLACK);
     einkDisplay.fillRoundRect(60, 0, 80, 20, 10, GxEPD_BLACK);
 
-    // rain drops
     randomSeed(42);
     for (int i = 0; i < 40; i++) {
       int rx = random(10, w - 80);
@@ -314,13 +340,29 @@ static void drawRainIdleScreen() {
 }
 
 void renderIdleScreen() {
-  if (isMenuOpen()) return; // don't draw e-ink while OLED menu is active
-
-  // Guard: skip E-Ink if user was typing in the last 3 seconds
-  unsigned long sinceKey = millis() - getLastKeyActivityTime();
-  if (sinceKey < 3000 && getLastKeyActivityTime() > 0) return;
+  if (isMenuOpen()) return;
+  if (!einkInitialized) return;
 
   MenuIdleMode mode = getSettings().einkIdleMode;
+
+  // Clock mode: update every second, independent of cooldown
+  if (mode == IdleClock) {
+    if (currentIdleMode != IdleClock) {
+      // Mode just changed to clock — force full redraw
+      currentIdleMode = IdleClock;
+      lastDrawnSecond = 0; // force immediate draw
+    }
+    // Don't update e-ink while user is typing (3s quiet window)
+    unsigned long sinceKey = millis() - getLastKeyActivityTime();
+    if (sinceKey < 3000 && getLastKeyActivityTime() > 0) return;
+    drawEinkClockIfNeeded();
+    return;
+  }
+
+  // Other modes: only redraw on mode change + cooldown
+  if (isMenuOpen()) return;
+  unsigned long sinceKey = millis() - getLastKeyActivityTime();
+  if (sinceKey < 3000 && getLastKeyActivityTime() > 0) return;
   if (mode == currentIdleMode) return;
 
   unsigned long now = millis();
@@ -329,12 +371,10 @@ void renderIdleScreen() {
   currentIdleMode = mode;
   lastIdleRenderMs = now;
 
-  if (!einkInitialized) return; // still booting
-
   // wake from hibernate, draw, sleep again
-  einkDisplay.init(115200, true, 50, false);
   switch (mode) {
     case IdleTotoro: {
+      einkWake();
       einkDisplay.setRotation(0);
       einkDisplay.setFullWindow();
       int x = (einkDisplay.width()  - totoro_200x200_1b_width)  / 2;
@@ -344,21 +384,19 @@ void renderIdleScreen() {
         einkDisplay.fillScreen(GxEPD_WHITE);
         einkDisplay.drawBitmap(x, y, totoro_200x200_1b, totoro_200x200_1b_width, totoro_200x200_1b_height, GxEPD_BLACK);
       } while (einkDisplay.nextPage());
+      einkSleep();
       break;
     }
     case IdleStatus:
       drawEinkStatusDashboard();
-      return; // already hibernates
+      break;
     case IdleAnimation:
       drawRainIdleScreen();
-      break;
-    case IdleClock:
-      drawEinkClock();
+      einkSleep();
       break;
     default:
       break;
   }
-  einkDisplay.hibernate();
 }
 
 void menuDemo() {

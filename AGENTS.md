@@ -11,7 +11,7 @@ ESP32 custom mechanical keyboard with BLE HID, 6×13 matrix, rotary encoder knob
 | **Rotary encoder CLK** | 18 | Quadrature A |
 | **Rotary encoder DT** | 19 | Quadrature B |
 | **Rotary encoder SW** | 13 | Push button (active-LOW, PULLUP) |
-| **E-Ink (GxEPD2 1.54" D67)** | CS=5 BUSY=15 RES=17 DC=16 | Static image / menu / dashboard |
+| **E-Ink (GxEPD2 1.54" D67)** | CS=5 BUSY=4 RES=16 DC=17 | Static image / menu / dashboard |
 | **OLED (SSD1306 128×64)** | I2C 0x3C | Caps lock, battery, status line |
 | **I2C bus** | SDA=21 SCL=22 (default Wire) | OLED + PCF8575 |
 

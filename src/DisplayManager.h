@@ -22,9 +22,7 @@ void drawBattery24x8(int x, int y, uint8_t level);
 void menuDemo();
 void einkAnimateCampfireRain(uint32_t duration_ms);
 void applyOledBrightness(uint8_t percent);
-void drawEinkStatusDashboard();
 void renderIdleScreen();
-void drawEinkClock();
 void oledDrawStatusLine();
 
 #endif
