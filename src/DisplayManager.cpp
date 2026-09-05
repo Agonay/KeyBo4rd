@@ -15,12 +15,11 @@
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 #define OLED_ADDR 0x3C
 
-// E-Ink — WeAct 1.54" B&W (GDEH0154D67, SSD1681)
-// Pinout matches WeAct Studio breakout board
+// E-Ink
 #define CS_PIN   5
-#define BUSY_PIN 4
-#define RES_PIN  16
-#define DC_PIN   17
+#define BUSY_PIN 15
+#define RES_PIN  17
+#define DC_PIN   16
 
 GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> einkDisplay(GxEPD2_154_D67(CS_PIN, DC_PIN, RES_PIN, BUSY_PIN));
 
@@ -368,7 +367,7 @@ void renderIdleScreen() {
   // Switching away from clock mode: sleep the display first
   if (currentIdleMode == IdleClock) {
     einkSleep();
-    currentIdleMode = (MenuIdleMode)255; // force re-render
+    currentIdleMode = (MenuIdleMode)255;
     lastDrawnSecond = 0;
   }
 
@@ -378,10 +377,9 @@ void renderIdleScreen() {
   if (mode == currentIdleMode) return;
 
   unsigned long now = millis();
-  if (now - lastIdleRenderMs < idleCooldownMs) return;
-
-  currentIdleMode = mode;
+  // Reset cooldown when mode actually changes so it renders immediately
   lastIdleRenderMs = now;
+  currentIdleMode = mode;
   Serial.printf("[EINK] mode=%d\n", (int)mode);
 
   switch (mode) {
