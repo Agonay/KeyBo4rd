@@ -36,6 +36,7 @@ void saveSettings() {
 // ---------- menu state ----------
 static bool menuOpen_ = false;
 static int  highlight = 0;
+static bool isEditing = false; // short press locks into edit mode
 
 static const char *rowLabels[MENU_ROW_COUNT] = {
   "1. Knob steps",
@@ -104,6 +105,7 @@ static void cycleValue(int idx) {
 // ---------- render flags ----------
 static bool needsRender = false;
 static int  lastHighlight = -1;
+static bool lastEditing = false;
 
 static void markDirty() { needsRender = true; }
 
@@ -156,7 +158,11 @@ void menuDrawOled() {
   // footer
   oled.drawFastHLine(0, 60, 128, SSD1306_WHITE);
   oled.setCursor(2, 61);
-  oled.print(F("S=chg L=back"));
+  if (isEditing) {
+    oled.print(F("S=done L=exit"));
+  } else {
+    oled.print(F("S=edit L=exit"));
+  }
 
   oled.display();
 }
@@ -222,15 +228,38 @@ void menuOpen() {
 
 void menuClose() {
   menuOpen_ = false;
+  isEditing = false;
   Serial.println(F("[MENU] close"));
+}
+
+void menuForceRender() {
+  needsRender = true;
 }
 
 void menuEventShort() {
   if (!menuOpen_) return;
-  cycleValue(highlight);
+  if (isEditing) {
+    // Exit edit mode, back to browse
+    isEditing = false;
+    markDirty();
+    Serial.printf("[MENU] exit edit mode, highlight=%d\n", highlight);
+  } else {
+    // Enter edit mode for current row
+    isEditing = true;
+    cycleValue(highlight); // apply first change immediately
+    markDirty();
+    Serial.printf("[MENU] enter edit mode, row=%d\n", highlight);
+  }
 }
 
 void menuEventLong() {
+  if (isEditing) {
+    // Exit edit mode first
+    isEditing = false;
+    markDirty();
+    Serial.println(F("[MENU] exit edit mode (long)"));
+    return;
+  }
   if (!menuOpen_) {
     menuOpen();
     return;
@@ -248,15 +277,27 @@ void menuEventVeryLong() {
 
 void menuRotate(int dir) {
   if (!menuOpen_) return;
-  highlight = (highlight + dir + MENU_ROW_COUNT) % MENU_ROW_COUNT;
+  if (isEditing) {
+    // In edit mode: rotate changes the value
+    cycleValue(highlight);
+  } else {
+    // In browse mode: rotate scrolls through options
+    highlight = (highlight + dir + MENU_ROW_COUNT) % MENU_ROW_COUNT;
+    Serial.printf("[MENU] highlight=%d\n", highlight);
+  }
   markDirty();
-  Serial.printf("[MENU] highlight=%d\n", highlight);
 }
 
 void menuRenderIfChanged() {
-  if (!menuOpen_) { needsRender = false; return; }
-  if (!needsRender && highlight == lastHighlight) return;
+  if (!menuOpen_) {
+    needsRender = false;
+    lastHighlight = -1;
+    lastEditing = false;
+    return;
+  }
+  if (!needsRender && highlight == lastHighlight && isEditing == lastEditing) return;
   menuDrawOled();
   lastHighlight = highlight;
+  lastEditing = isEditing;
   needsRender = false;
 }

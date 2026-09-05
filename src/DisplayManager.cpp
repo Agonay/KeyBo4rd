@@ -104,7 +104,12 @@ static void oledClearLine() {
 void oledDrawStatusLine() {
   bool nowOpen = isMenuOpen();
   if (nowOpen) { menuWasOpen = true; return; }
-  if (menuWasOpen) { oledNeedsRedraw = true; lastBatPct = -1; lastCapsOn = !lastCapsOn; lastBleConn = !lastBleConn; menuWasOpen = false; }
+  if (menuWasOpen) {
+    oled.clearDisplay(); // clear entire screen, not just top 20px
+    oledNeedsRedraw = true;
+    lastBatPct = -1; lastCapsOn = !lastCapsOn; lastBleConn = !lastBleConn;
+    menuWasOpen = false;
+  }
 
   KbdSettings &s = getSettings();
   if (!s.showBattery && !oledNeedsRedraw) return;
@@ -124,7 +129,7 @@ void oledDrawStatusLine() {
   oledClearLine();
 
   // Caps lock icon
-  if (!capsOn) {
+  if (capsOn) {
     oled.drawBitmap(112, 1, ship16_bitmap, SHIP16_WIDTH, SHIP16_HEIGHT, SSD1306_WHITE);
   }
 
@@ -230,13 +235,15 @@ void demoFourStatesRow(int y) {
 }
 
 // ---------- E-Ink runtime clock ----------
-// Called from loop — only draws when second changes, wakes/sleeps display
+// Called from loop — only draws when 10-second block changes
 static void drawEinkClockIfNeeded() {
   if (!einkInitialized) return;
 
+  // Update every 10 seconds to avoid blocking the keyboard
   unsigned long nowSec = millis() / 1000;
-  if (nowSec == lastDrawnSecond) return; // nothing changed
-  lastDrawnSecond = nowSec;
+  unsigned long block10 = nowSec / 10;
+  if (block10 == lastDrawnSecond) return;
+  lastDrawnSecond = block10;
 
   einkWake();
   einkDisplay.setRotation(0);
@@ -266,7 +273,7 @@ static void drawEinkClockIfNeeded() {
     einkDisplay.print(F("Runtime (HH:MM:SS)"));
 
   } while (einkDisplay.nextPage());
-  einkSleep();
+  // Don't sleep — keep awake for next 10s update in clock mode
 }
 
 // ---------- E-Ink status dashboard ----------
@@ -345,22 +352,27 @@ void renderIdleScreen() {
 
   MenuIdleMode mode = getSettings().einkIdleMode;
 
-  // Clock mode: update every second, independent of cooldown
+  // Clock mode: update every 10 seconds, keep display awake
   if (mode == IdleClock) {
     if (currentIdleMode != IdleClock) {
-      // Mode just changed to clock — force full redraw
       currentIdleMode = IdleClock;
-      lastDrawnSecond = 0; // force immediate draw
+      lastDrawnSecond = 0;
+      Serial.println(F("[EINK] mode->Clock"));
     }
-    // Don't update e-ink while user is typing (3s quiet window)
     unsigned long sinceKey = millis() - getLastKeyActivityTime();
     if (sinceKey < 3000 && getLastKeyActivityTime() > 0) return;
     drawEinkClockIfNeeded();
     return;
   }
 
+  // Switching away from clock mode: sleep the display first
+  if (currentIdleMode == IdleClock) {
+    einkSleep();
+    currentIdleMode = (MenuIdleMode)255; // force re-render
+    lastDrawnSecond = 0;
+  }
+
   // Other modes: only redraw on mode change + cooldown
-  if (isMenuOpen()) return;
   unsigned long sinceKey = millis() - getLastKeyActivityTime();
   if (sinceKey < 3000 && getLastKeyActivityTime() > 0) return;
   if (mode == currentIdleMode) return;
@@ -370,8 +382,8 @@ void renderIdleScreen() {
 
   currentIdleMode = mode;
   lastIdleRenderMs = now;
+  Serial.printf("[EINK] mode=%d\n", (int)mode);
 
-  // wake from hibernate, draw, sleep again
   switch (mode) {
     case IdleTotoro: {
       einkWake();

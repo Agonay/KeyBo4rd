@@ -108,7 +108,7 @@ The OS is configured **Spanish (Spain) on ANSI physical**. Characters are produc
 ### Menu system
 
 ```
-Idle screen → long-press → root menu
+Idle screen → long-press → root menu (browse mode)
   ├─ Knob / Volume
   │    ├─ Steps per detent (1-4)
   │    └─ Direction (normal / inverted)
@@ -118,10 +118,13 @@ Idle screen → long-press → root menu
   ├─ Idle screen
   │    ├─ Totoro (default)
   │    ├─ Status dashboard
-  │    └─ Animation
+  │    ├─ Animation
+  │    └─ Clock (runtime)
   └─ Battery & power
        ├─ Show battery
        └─ Low-battery threshold
 
-Navigation: rotate → scroll/change; short → enter/select; long → back; very-long → exit
+Browse mode: rotate → scroll options; short → enter edit mode; long → exit menu
+Edit mode:   rotate → change value; short → done (back to browse); long → exit edit mode
+Footer shows: "S=edit L=exit" (browse) or "S=done L=exit" (edit)
 ```

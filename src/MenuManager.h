@@ -51,4 +51,7 @@ void menuDrawOled();
 // Only redraw if state changed; call from loop
 void menuRenderIfChanged();
 
+// Force a full menu redraw (e.g. after value change)
+void menuForceRender();
+
 #endif
