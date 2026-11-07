@@ -195,21 +195,23 @@ static bool downloadAndFlash(const Manifest &m) {
   int lastPct = -1;
   unsigned long lastData = millis();
   const String label = String("v") + FW_VERSION + " -> v" + m.version;
+  // Don't trust connected()/available() on the TLS stream (they can report a
+  // momentary gap as a disconnect); keep reading until data stops for 20 s.
   while (written < m.size) {
-    const size_t avail = stream->available();
-    if (avail) {
-      size_t want = min(avail, sizeof(buf));
-      want = min(want, (size_t)(m.size - written));
-      const int n = stream->readBytes(buf, want);
-      if (n <= 0 || Update.write(buf, n) != (size_t)n) break;
+    const size_t want = min(sizeof(buf), (size_t)(m.size - written));
+    const int n = stream->readBytes(buf, want);
+    if (n > 0) {
+      if (Update.write(buf, n) != (size_t)n) {
+        Update.printError(Serial);
+        break;
+      }
       written += n;
       lastData = millis();
       const int pct = (int)((written * 100) / m.size);
       if (pct != lastPct) { lastPct = pct; oledShow("Updating firmware", label, pct); }
-    } else if (!stream->connected() || millis() - lastData > 15000) {
+    } else if (millis() - lastData > 20000) {
+      Serial.println("[OTA] download stalled (no data for 20 s)");
       break;
-    } else {
-      delay(1);
     }
   }
   http.end();
