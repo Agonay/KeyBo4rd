@@ -22,9 +22,9 @@ const Key keyboardLayout[numRows][numColsPCF] = {
   {Key_Grado, Key_1, Key_2, Key_3, Key_4, Key_5, Key_6,
    Key_7, Key_8, Key_9, Key_0, Key_Apostrophe_ES, Key_ExclInv},
 
-  // Row 2 — QWERTY row: Tab Q W E R T Y U I O P ´ +
+  // Row 2 — QWERTY row: Tab Q W E R T Y U I O P [ ]
   {Key_Tab, Key_Q, Key_W, Key_E, Key_R, Key_T, Key_Y,
-   Key_U, Key_I, Key_O, Key_P, Key_Acento, Key_Mas},
+   Key_U, Key_I, Key_O, Key_P, Key_LeftBracket, Key_RightBracket},
 
   // Row 3 — Home row: Caps A S D F G H J K L Ñ ´ Enter
   {Key_CapsLock, Key_A, Key_S, Key_D, Key_F, Key_G, Key_H,
@@ -34,161 +34,90 @@ const Key keyboardLayout[numRows][numColsPCF] = {
   {Key_Shift, Key_Z, Key_X, Key_C, Key_V, Key_B, Key_N,
    Key_M, Key_Comma_ES, Key_Period_ES, Key_Guion, Key_Shift, Key_ArrowUp},
 
-  // Row 5 — Bottom: Ctrl Win Alt Space AltGr \  ← ↓ → \ Backspace Delete
+  // Row 5 — Bottom: Ctrl Win Alt Space AltGr <  ← ↓ → \ Backspace Delete
   {Key_Ctrl, Key_Cmd, Key_Left_Alt, Key_Space, Key_Right_Alt,
-   Key_Backslash, Key_Acento,
+   Key_LessThan, Key_Acento,
    Key_ArrowLeft, Key_ArrowDown, Key_ArrowRight,
    Key_Backslash, Key_Backspace, Key_Delete},
 };
 
-// ---------- State ----------
+// All physical states are sampled before building one complete HID report.
 KeyState keyStates[numRows][numColsPCF];
-
 const int rowPins[numRows] = {25, 33, 12, 26, 27, 14};
-const uint8_t colPinsPCF[numColsPCF] = {
-  P15, P13, P4, P1, P3, P7, P5, P6, P11, P0, P2, P14, P12
-};
-
-const unsigned long debounceDelay = 10;
-const unsigned long initialRepeatDelay = 500;
-const unsigned long repeatRate = 80;
-
-unsigned long lastScanTime = 0;
-const unsigned long scanInterval = 8;
-
-// Safety: force-release any key held > 2 s
-const unsigned long maxHoldTimeMs = 2000;
-
-// Track last key activity for display guards
-volatile unsigned long lastKeyActivityTime = 0;
+const uint8_t colPinsPCF[numColsPCF] = {P15, P13, P4, P1, P3, P7, P5, P6, P11, P0, P2, P14, P12};
+static unsigned long lastScanTime = 0;
+static unsigned long lastKeyActivityTime = 0;
+static KeyReport lastReport = {};
+static bool matrixReady = false;
+static bool wasConnected = false;
+static bool waitForRelease = false;
 
 void initKeyboardMatrix() {
-  for (int i = 0; i < numColsPCF; i++) {
-    gpioExpander.pinMode(colPinsPCF[i], OUTPUT);
-    gpioExpander.digitalWrite(colPinsPCF[i], HIGH);
+  for (int col = 0; col < numColsPCF; ++col) {
+    gpioExpander.pinMode(colPinsPCF[col], OUTPUT);
+    gpioExpander.digitalWrite(colPinsPCF[col], HIGH);
   }
-
-  for (int i = 0; i < numRows; i++) {
-    pinMode(rowPins[i], INPUT_PULLUP);
-  }
-
-  if (!gpioExpander.begin()) {
-    Serial.println("Failed to initialize PCF8575!");
-    while (1);
-  }
-  delay(1000);
-  bleKeyboard.release(KEY_CAPS_LOCK);
-  Serial.println("PCF8575 initialized successfully. Keyboard Matrix Initialized");
+  for (int pin : rowPins) pinMode(pin, INPUT_PULLUP);
+  matrixReady = gpioExpander.begin();
+  Serial.println(matrixReady ? "[MATRIX] ready" : "[MATRIX] PCF8575 unavailable; check wiring");
 }
 
 void scanKeyboardMatrix() {
-  unsigned long currentTime = millis();
-
-  if (currentTime - lastScanTime < scanInterval) return;
-  lastScanTime = currentTime;
-
-  bool shiftPressed = keyStates[4][0].isPressed || keyStates[4][11].isPressed;
-  bool altPressed   = keyStates[5][2].isPressed || keyStates[5][4].isPressed;
-
-  for (int col = 0; col < numColsPCF; col++) {
+  const unsigned long now = millis();
+  if (!matrixReady || now - lastScanTime < 4) return;
+  lastScanTime = now;
+  bool anyDown = false;
+  for (int col = 0; col < numColsPCF; ++col) {
     gpioExpander.digitalWrite(colPinsPCF[col], LOW);
     delayMicroseconds(15);
-
-    for (int row = 0; row < numRows; row++) {
-      bool rawPressed = (digitalRead(rowPins[row]) == LOW);
-
-      KeyState &ks = keyStates[row][col];
-
-      // Debounce: only act if state has been stable for debounceDelay
-      if (rawPressed != ks.lastRawState) {
-        ks.lastRawState = rawPressed;
-        ks.stateChangeTime = currentTime;
-        continue;
+    for (int row = 0; row < numRows; ++row) {
+      const bool raw = digitalRead(rowPins[row]) == LOW;
+      KeyState &state = keyStates[row][col];
+      if (raw != state.lastRawState) {
+        state.lastRawState = raw;
+        state.stateChangeTime = now;
       }
-      if (currentTime - ks.stateChangeTime < debounceDelay) {
-        continue;
+      if (now - state.stateChangeTime >= 10 && raw != state.isPressed) {
+        state.isPressed = raw;
+        lastKeyActivityTime = now;
       }
-
-      if (rawPressed) {
-        if (!ks.isPressed) {
-          // Fresh press — debounce confirmed
-          ks.isPressed = true;
-          ks.firstPressTime = currentTime;
-          ks.lastRepeatTime = currentTime;
-          ks.wasSent = false;
-
-          lastKeyActivityTime = currentTime;
-          sendKeyPress(row, col, shiftPressed, altPressed);
-          ks.wasSent = true;
-        } else {
-          // Auto-repeat
-          if (currentTime - ks.firstPressTime >= initialRepeatDelay) {
-            if (currentTime - ks.lastRepeatTime >= repeatRate) {
-              ks.lastRepeatTime = currentTime;
-
-              lastKeyActivityTime = currentTime;
-              sendKeyPress(row, col, shiftPressed, altPressed);
-              ks.wasSent = true;
-            }
-          }
-        }
-      } else {
-        if (ks.isPressed) {
-          // Release
-          ks.isPressed = false;
-          ks.wasSent = false;
-          releaseKey(row, col);
-          lastKeyActivityTime = currentTime;
-        }
-      }
+      anyDown |= raw || state.isPressed;
     }
     gpioExpander.digitalWrite(colPinsPCF[col], HIGH);
   }
-
-  // Safety: force-release any key held too long
-  for (int col = 0; col < numColsPCF; col++) {
-    for (int row = 0; row < numRows; row++) {
-      if (keyStates[row][col].isPressed &&
-          (currentTime - keyStates[row][col].firstPressTime > maxHoldTimeMs)) {
-        keyStates[row][col].isPressed = false;
-        releaseKey(row, col);
-        lastKeyActivityTime = currentTime;
+  const bool connected = isConnected();
+  if (connected != wasConnected) {
+    waitForRelease = true; // never replay a key held across a disconnection
+    lastReport = {};
+    wasConnected = connected;
+  }
+  if (!connected) return;
+  if (waitForRelease) {
+    if (anyDown) return;
+    waitForRelease = false;
+  }
+  KeyReport report = {};
+  unsigned count = 0;
+  for (int row = 0; row < numRows; ++row) {
+    for (int col = 0; col < numColsPCF; ++col) {
+      if (!keyStates[row][col].isPressed) continue;
+      const Key &key = keyboardLayout[row][col];
+      report.modifiers |= key.modifiers;
+      if (!key.usage) continue;
+      bool duplicate = false;
+      for (unsigned i = 0; i < count && i < 6; ++i) duplicate |= report.keys[i] == key.usage;
+      if (!duplicate) {
+        if (count < 6) report.keys[count] = key.usage;
+        ++count;
       }
     }
   }
-}
-
-void sendKeyPress(int row, int col, bool shiftPressed, bool altPressed) {
-  if (!bleKeyboard.isConnected()) return;
-
-  Key key = keyboardLayout[row][col];
-
-  if (key.isModifier) {
-    bleKeyboard.press(key.normalKey);
-    if (key.normalKey == KEY_CAPS_LOCK) {
-      capsLockStatus(isCapsFromHost());
-    }
-  } else {
-    if (altPressed && key.altKey != 0) {
-      bleKeyboard.press(key.altKey);
-    } else if (shiftPressed && key.shiftKey != 0) {
-      bleKeyboard.press(key.shiftKey);
-    } else {
-      bleKeyboard.press(key.normalKey);
-    }
+  if (count > 6) memset(report.keys, 1, sizeof(report.keys)); // HID ErrorRollOver
+  if (memcmp(&report, &lastReport, sizeof(report)) != 0) {
+    bleKeyboard.sendReport(&report);
+    lastReport = report;
   }
+  // Repeat belongs to the host; held keys remain held for any duration.
 }
 
-void releaseKey(int row, int col) {
-  if (!bleKeyboard.isConnected()) return;
-
-  Key key = keyboardLayout[row][col];
-
-  if (key.normalKey) bleKeyboard.release(key.normalKey);
-  if (key.shiftKey)  bleKeyboard.release(key.shiftKey);
-  if (key.altKey)    bleKeyboard.release(key.altKey);
-}
-
-unsigned long getLastKeyActivityTime() {
-  return lastKeyActivityTime;
-}
+unsigned long getLastKeyActivityTime() { return lastKeyActivityTime; }

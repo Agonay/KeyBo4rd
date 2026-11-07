@@ -8,6 +8,7 @@
 #include "totoro_200x200_1b.h"
 #include "ship16.h"
 #include "fire16.h"
+#include "HardwareConfig.h"
 
 #define ENABLE_GxEPD2_GFX 0
 
@@ -55,6 +56,11 @@ static void einkSleep() {
   }
 }
 
+static void serviceKeyboardDuringRefresh(const void*) {
+  scanKeyboardMatrix();
+  delay(1);
+}
+
 void initDisplay() {
   delay(1000);
 
@@ -69,6 +75,10 @@ void initDisplay() {
   oled.drawFastHLine(0, 19, oled.width(), SSD1306_WHITE);
   oled.display();
 
+  applyOledBrightness(getSettings().oledBrightness);
+#if ENABLE_EINK
+  SPI.begin(EINK_SCK, -1, EINK_MOSI, CS_PIN);
+  einkDisplay.epd2.setBusyCallback(serviceKeyboardDuringRefresh);
   // E-Ink boot: show Totoro, then hibernate
   einkDisplay.init(115200, true, 50, false);
   einkDisplay.setRotation(0);
@@ -87,6 +97,7 @@ void initDisplay() {
   currentIdleMode = (MenuIdleMode)255; // sentinel: force first renderIdleScreen call
   lastOledBrt     = getSettings().oledBrightness;
   lastDrawnSecond = 0;
+#endif
 }
 
 // ---------- OLED helpers ----------
@@ -111,7 +122,7 @@ void oledDrawStatusLine() {
   }
 
   KbdSettings &s = getSettings();
-  if (!s.showBattery && !oledNeedsRedraw) return;
+
 
   bool changed = false;
   bool capsOn = isCapsFromHost();

@@ -128,3 +128,14 @@ Browse mode: rotate → scroll options; short → enter edit mode; long → exit
 Edit mode:   rotate → change value; short → done (back to browse); long → exit edit mode
 Footer shows: "S=edit L=exit" (browse) or "S=done L=exit" (edit)
 ```
+
+## Firmware updates (OTA from GitHub)
+
+- **Release flow:** a push to `master` that touches `src/**`, `platformio.ini` or `scripts/**` runs `.github/workflows/firmware.yml`. It builds with `FW_VERSION=<run number>` and publishes the release `fw-N` with `firmware.bin` and `version.json` (`{"version","md5","size"}`).
+- **Device side (`OtaUpdater.{h,cpp}`):**
+  - `otaBootCheck()` runs before `initBluetooth()`. It joins Wi-Fi, reads `releases/latest/download/version.json`, and if the release is newer, streams `firmware.bin` into the spare OTA slot (MD5-checked) and reboots.
+  - `otaLoop()`: after 4 min idle (no keys/knob, menu closed), at most once an hour, a core-0 task checks the version while BLE stays up. If a newer one exists, it sets the NVS flag `otaPend` and the device reboots, so the download happens in the boot path.
+- **Wi-Fi credentials** live in NVS (`kbd`/`wifiSsid`, `wifiPass`). To set them, hold the knob at power-on. The OLED shows the hotspot password; open `http://192.168.4.1` and fill in the Wi-Fi form. The same page has a manual `.bin` upload for recovery.
+- **Dev builds:** local builds have `FW_VERSION=0` (`scripts/fw_version.py`), which turns auto-update off, so USB-flashed test firmware is not overwritten.
+- **TLS roots:** `GithubRootCAs.h` pins the Sectigo/USERTrust (github.com), ISRG/Let's Encrypt (release-assets host) and DigiCert roots. If GitHub changes CA, update this file.
+- **No automatic rollback:** a release that crashes at boot needs a USB reflash. Flash usage is ~92% of the 1.9 MB OTA slot.

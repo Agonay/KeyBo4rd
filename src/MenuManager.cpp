@@ -1,6 +1,8 @@
 #include "MenuManager.h"
 #include "DisplayManager.h"
 #include "BluetoothHID.h"
+#include "HardwareConfig.h"
+#include "OtaUpdater.h"  // FW_VERSION
 
 // ---------- persistence ----------
 static Preferences prefs;
@@ -98,7 +100,6 @@ static void cycleValue(int idx) {
       break;
     }
   }
-  saveSettings();
   Serial.printf("[MENU] row%d cycled\n", idx);
 }
 
@@ -119,6 +120,12 @@ void menuDrawOled() {
   // header
   oled.setCursor(2, 1);
   oled.print(F("MENU"));
+  // firmware version, right-aligned in the header
+  char fw[12];
+  if (FW_VERSION == 0) snprintf(fw, sizeof(fw), "FW dev");
+  else snprintf(fw, sizeof(fw), "FW v%d", FW_VERSION);
+  oled.setCursor(126 - (int)strlen(fw) * 6, 1);
+  oled.print(fw);
   oled.drawFastHLine(0, 9, 128, SSD1306_WHITE);
 
   // 6 rows: rows 0..5, each 8px tall, starting at y=12
@@ -169,6 +176,7 @@ void menuDrawOled() {
 
 // ---------- e-ink drawing ----------
 void menuDrawEink() {
+#if ENABLE_EINK
   char buf[20];
   einkDisplay.init(115200, true, 50, false);
   einkDisplay.setRotation(0);
@@ -205,6 +213,7 @@ void menuDrawEink() {
     einkDisplay.print(F("Short=change  Long=close"));
   } while (einkDisplay.nextPage());
   einkDisplay.hibernate();
+#endif
 }
 
 // ---------- public ----------
@@ -227,6 +236,7 @@ void menuOpen() {
 }
 
 void menuClose() {
+  saveSettings();
   menuOpen_ = false;
   isEditing = false;
   Serial.println(F("[MENU] close"));
@@ -239,6 +249,7 @@ void menuForceRender() {
 void menuEventShort() {
   if (!menuOpen_) return;
   if (isEditing) {
+    saveSettings();
     // Exit edit mode, back to browse
     isEditing = false;
     markDirty();
@@ -254,6 +265,7 @@ void menuEventShort() {
 
 void menuEventLong() {
   if (isEditing) {
+    saveSettings();
     // Exit edit mode first
     isEditing = false;
     markDirty();

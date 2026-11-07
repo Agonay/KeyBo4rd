@@ -1,81 +1,55 @@
-#include <Arduino.h>
 #include "BluetoothHID.h"
-#include "DisplayManager.h"
+#include <BLEDevice.h>
+#include <esp_bt.h>
 
-static volatile uint8_t s_leds = 0;
-static bool s_wasConnected = false;
-
-#if defined(USE_NIMBLE)
-  #include <NimBLECharacteristic.h>
-  class MyBleKeyboard : public BleKeyboard {
-  public:
-    MyBleKeyboard() : BleKeyboard() {}
-    MyBleKeyboard(const char* name, const char* mfg, uint8_t batt=100)
-      : BleKeyboard(name, mfg, batt) {}
-
-    void onWrite(NimBLECharacteristic* c) override {
-      std::string v = c->getValue();
-      if (v.empty()) return;
-      uint8_t leds = (uint8_t)v[0];
-      if (leds != s_leds) {
-        s_leds = leds;
-        Serial.printf("[BLE] CapsLock: %s\n", (leds & 0x02) ? "ON" : "OFF");
-      }
-    }
-  };
-#else
-  #include <BLECharacteristic.h>
-  #include <BLEUtils.h>
-  class MyBleKeyboard : public BleKeyboard {
-  public:
-    MyBleKeyboard() : BleKeyboard() {}
-    MyBleKeyboard(const char* name, const char* mfg, uint8_t batt=100)
-      : BleKeyboard(name, mfg, batt) {}
-
-    void onWrite(BLECharacteristic* c) override {
-      const uint8_t* d = (const uint8_t*)c->getData();
-      if (!d) return;
-      uint8_t leds = *d;
-      if (leds != s_leds) {
-        s_leds = leds;
-        Serial.printf("[BLE] CapsLock: %s\n", (leds & 0x02) ? "ON" : "OFF");
-      }
-    }
-
-    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override {
-      BleKeyboard::onConnect(pServer);
-      // Request aggressive connection intervals for lower latency
-      // min_int=6 (7.5ms), max_int=12 (15ms), latency=0, timeout=50 (500ms)
-      pServer->updateConnParams(param->connect.remote_bda, 6, 12, 0, 50);
-    }
-  };
-#endif
-
-static MyBleKeyboard keyboard("K3YBo4rd", "AgonaySS", 100);
+static volatile uint8_t leds = 0;
+static bool wasConnected = false;
+static unsigned long connectedAt = 0;
+class Keyboard : public BleKeyboard {
+public:
+  Keyboard() : BleKeyboard("K3YBo4rd", "AgonaySS", 100) {}
+  void onWrite(BLECharacteristic* c) override {
+    const std::string value = c->getValue();
+    if (!value.empty()) leds = static_cast<uint8_t>(value[0]);
+  }
+  void onConnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) override {
+    // The core invokes the inherited one-argument callback as well.
+    // 15-30 ms interval, no slave latency, 6 s supervision timeout.
+    server->updateConnParams(param->connect.remote_bda, 12, 24, 0, 600);
+    BLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_CONN_HDL0);
+  }
+};
+static Keyboard keyboard;
 BleKeyboard& bleKeyboard = keyboard;
 
 void initBluetooth() {
-  bleKeyboard.setDelay(1);  // reduce inter-send delay from 7ms to 1ms
   bleKeyboard.begin();
-  s_wasConnected = false;
+  BLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_ADV);
+  BLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_DEFAULT);
 }
-
-bool isCapsFromHost() {
-  return (s_leds & 0x02) != 0;
-}
-
-// Track connection edge and clear latched keys on reconnect
+bool isCapsFromHost() { return (leds & 2) != 0; }
 bool isConnected() {
-  bool connected = bleKeyboard.isConnected();
-  if (connected && !s_wasConnected) {
-    // Just reconnected — release all latched keys to prevent spam
-    s_wasConnected = true;
-    bleKeyboard.releaseAll();
-    Serial.println(F("[BLE] reconnected → releaseAll"));
-    return false; // caller should skip sending this cycle
-  }
+  const bool connected = bleKeyboard.isConnected();
   if (!connected) {
-    s_wasConnected = false;
+    if (wasConnected) Serial.println("[BLE] disconnected; advertising restarted");
+    wasConnected = false;
+    leds = 0;
+    return false;
   }
-  return connected;
+  if (!wasConnected) {
+    connectedAt = millis();
+    wasConnected = true;
+    Serial.println("[BLE] connected; waiting for host subscription");
+  }
+  // Give encryption/service subscription time before resetting the host report.
+  static bool ready = false;
+  if (millis() - connectedAt < 1000) { ready = false; return false; }
+  if (!ready) {
+    bleKeyboard.releaseAll();
+    MediaKeyReport media = {};
+    bleKeyboard.sendReport(&media);
+    ready = true;
+    Serial.println("[BLE] ready; reports cleared");
+  }
+  return true;
 }

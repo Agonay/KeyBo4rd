@@ -10,5 +10,6 @@ void handleRotaryEncoder();
 
 enum ButtonEvent { BTN_NONE, BTN_SHORT, BTN_LONG, BTN_VERYLONG };
 ButtonEvent pollButtonEvent();
+unsigned long getLastKnobActivityTime();
 
 #endif

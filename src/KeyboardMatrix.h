@@ -6,8 +6,6 @@
 
 void initKeyboardMatrix();
 void scanKeyboardMatrix();
-void sendKeyPress(int row, int col, bool shiftPressed, bool altPressed);
-void releaseKey(int row, int col);
 unsigned long getLastKeyActivityTime();
 
 #endif

@@ -9,7 +9,7 @@
 #define SW_PIN  13
 
 // ---------- quadrature decoder ----------
-const int8_t qdec_lut[16] = {
+DRAM_ATTR const int8_t qdec_lut[16] = {
   0, -1, +1,  0,
  +1,  0,  0, -1,
  -1,  0,  0, +1,
@@ -18,7 +18,7 @@ const int8_t qdec_lut[16] = {
 
 const uint8_t STEPS_PER_DETENT = 4;
 volatile long encoderTicks = 0;
-long          encoderDetents = 0;
+volatile long encoderDetents = 0;
 uint8_t       prevAB = 0;
 
 // tiny noise filter (microseconds) — the LUT self-corrects; only skip extreme chatter
@@ -55,10 +55,19 @@ static bool btnDown = false;
 static bool longFired = false;
 static bool vlongFired = false;
 static volatile ButtonEvent pendingEvent = BTN_NONE;
+static unsigned long lastKnobActivity = 0;
+unsigned long getLastKnobActivityTime() { return lastKnobActivity; }
 
 void handleButtonPress() {
-  bool reading = digitalRead(SW_PIN) == LOW;
   unsigned long now = millis();
+  static bool lastRaw = false;
+  static bool stable = false;
+  static unsigned long changedAt = 0;
+  const bool raw = digitalRead(SW_PIN) == LOW;
+  if (raw != lastRaw) { lastRaw = raw; changedAt = now; }
+  if (now - changedAt >= 25) stable = raw;
+  if (stable) lastKnobActivity = now;
+  const bool reading = stable;
   uint16_t longMs  = getSettings().longPressMs;
   uint16_t vlongMs = getSettings().veryLongPressMs;
 
@@ -97,8 +106,37 @@ ButtonEvent pollButtonEvent() {
   return ev;
 }
 
+static int pendingVolume = 0;
+static bool pendingPlay = false;
+static bool mediaDown = false;
+static unsigned long mediaAt = 0;
+static void serviceMedia() {
+  if (!isConnected()) {
+    pendingVolume = 0;
+    pendingPlay = false;
+    mediaDown = false;
+    return;
+  }
+  if (millis() - mediaAt < 20) return;
+  MediaKeyReport report = {};
+  if (mediaDown) {
+    mediaDown = false;
+  } else if (pendingPlay) {
+    report[0] = KEY_MEDIA_PLAY_PAUSE[0];
+    pendingPlay = false;
+    mediaDown = true;
+  } else if (pendingVolume) {
+    report[0] = pendingVolume > 0 ? KEY_MEDIA_VOLUME_UP[0] : KEY_MEDIA_VOLUME_DOWN[0];
+    pendingVolume += pendingVolume > 0 ? -1 : 1;
+    mediaDown = true;
+  } else return;
+  bleKeyboard.sendReport(&report);
+  mediaAt = millis();
+}
+
 // ---------- rotation drain ----------
 void handleRotaryEncoder() {
+  serviceMedia();
   // button routing
   ButtonEvent ev = pollButtonEvent();
   if (ev != BTN_NONE) {
@@ -114,15 +152,15 @@ void handleRotaryEncoder() {
     } else {
       switch (ev) {
         case BTN_SHORT:
-          if (bleKeyboard.isConnected()) {
-            bleKeyboard.write(KEY_MEDIA_PLAY_PAUSE);
+          if (isConnected()) {
+            pendingPlay = true;
             Serial.println(F("[BTN] media key sent"));
           } else {
             Serial.println(F("[BTN] BLE not connected"));
           }
           break;
         case BTN_VERYLONG:
-          if (bleKeyboard.isConnected()) {
+          if (isConnected()) {
             bleKeyboard.releaseAll();
             Serial.println(F("[BTN] recovery: releaseAll"));
           }
@@ -134,35 +172,28 @@ void handleRotaryEncoder() {
   }
 
   // rotation drain
-  if (encoderDetents != encoderDetents) { /* noop, compiler guard */ }
+
   long det = encoderDetents;
   static long lastDet = 0;
   if (det == lastDet) return;
+  lastKnobActivity = millis();
 
   int dir = (det > lastDet) ? +1 : -1;
-  int steps = abs(det - lastDet);
+  int steps = min(4, (int)abs(det - lastDet));
 
   if (isMenuOpen()) {
-    menuRotate(dir);
-  } else if (bleKeyboard.isConnected()) {
+    for (int i = 0; i < steps; ++i) menuRotate(dir);
+  } else if (isConnected()) {
     KbdSettings &s = getSettings();
     uint8_t reps = s.volStepsPerDetent;
     if (s.volInvertDir) dir = -dir;
 
-    if (dir > 0) {
-      for (uint8_t i = 0; i < reps; i++) {
-        bleKeyboard.write(KEY_MEDIA_VOLUME_UP);
-      }
-    } else {
-      for (uint8_t i = 0; i < reps; i++) {
-        bleKeyboard.write(KEY_MEDIA_VOLUME_DOWN);
-      }
-    }
+    pendingVolume = constrain(pendingVolume + dir * reps * steps, -32, 32);
     Serial.printf("ENC %s | det=%ld reps=%d\n",
       (dir > 0) ? "CW" : "CCW", det, reps);
   }
 
-  lastDet = det;
+  lastDet += (det > lastDet ? steps : -steps);
 }
 
 void initRotaryEncoder() {

@@ -9,7 +9,7 @@ extern BleKeyboard& bleKeyboard;
 void initBluetooth();
 bool isCapsFromHost();
 
-// Returns true if we just reconnected (for releaseAll)
+// Ready after connection settling and clearing keyboard/media reports.
 bool isConnected();
 
 #endif
