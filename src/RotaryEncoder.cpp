@@ -137,6 +137,7 @@ static void serviceMedia() {
     return;
   }
   if (millis() - mediaAt < 20) return;
+  if (!bleCanSend()) return;   // link busy: keep pending steps for later
   MediaKeyReport report = {};
   if (mediaDown) {
     mediaDown = false;

@@ -53,6 +53,48 @@ static bool matrixReady = false;
 static bool wasConnected = false;
 static bool waitForRelease = false;
 
+// ---------- paced report queue ----------
+// Bluedroid notifications don't block: anything sent faster than the link can
+// carry piles up inside the stack (lag, releases arriving seconds late so the
+// host auto-repeats, then a disconnect). Reports wait here instead and leave
+// only when the stack has a free TX buffer. Every report is a full snapshot,
+// so when the queue is full the newest entry is overwritten: it never grows.
+static const unsigned QUEUE_LEN = 16;
+static const unsigned long MIN_SEND_GAP_MS = 8;
+static KeyReport reportQueue[QUEUE_LEN];
+static unsigned qHead = 0, qCount = 0;
+static unsigned long lastSendMs = 0;
+static uint32_t qCollapsed = 0;
+
+static void queueClear() { qHead = qCount = 0; }
+
+static void queuePush(const KeyReport &r) {
+  if (qCount == QUEUE_LEN) {
+    reportQueue[(qHead + qCount - 1) % QUEUE_LEN] = r;
+    ++qCollapsed;
+    return;
+  }
+  reportQueue[(qHead + qCount) % QUEUE_LEN] = r;
+  ++qCount;
+}
+
+static void drainReports(unsigned long now) {
+  if (!qCount || now - lastSendMs < MIN_SEND_GAP_MS || !bleCanSend()) return;
+  bleKeyboard.sendReport(&reportQueue[qHead]);
+  qHead = (qHead + 1) % QUEUE_LEN;
+  --qCount;
+  lastSendMs = now;
+}
+
+static void logLinkStats(unsigned long now) {
+  static unsigned long lastLog = 0;
+  if (now - lastLog < 10000) return;
+  lastLog = now;
+  Serial.printf("[BLE] heap=%u minHeap=%u sendable=%u q=%u collapsed=%lu\n",
+                ESP.getFreeHeap(), ESP.getMinFreeHeap(), bleSendableCount(), qCount,
+                (unsigned long)qCollapsed);
+}
+
 void initKeyboardMatrix() {
   for (int col = 0; col < numColsPCF; ++col) {
     gpioExpander.pinMode(colPinsPCF[col], OUTPUT);
@@ -91,6 +133,7 @@ void scanKeyboardMatrix() {
   if (connected != wasConnected) {
     waitForRelease = true; // never replay a key held across a disconnection
     lastReport = {};
+    queueClear();
     wasConnected = connected;
   }
   if (!connected) return;
@@ -116,9 +159,11 @@ void scanKeyboardMatrix() {
   }
   if (count > 6) memset(report.keys, 1, sizeof(report.keys)); // HID ErrorRollOver
   if (memcmp(&report, &lastReport, sizeof(report)) != 0) {
-    bleKeyboard.sendReport(&report);
+    queuePush(report);
     lastReport = report;
   }
+  drainReports(now);
+  logLinkStats(now);
   // Repeat belongs to the host; held keys remain held for any duration.
 }
 

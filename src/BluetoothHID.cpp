@@ -1,10 +1,12 @@
 #include "BluetoothHID.h"
 #include <BLEDevice.h>
 #include <esp_bt.h>
+#include <esp_gatt_common_api.h>
 
 static volatile uint8_t leds = 0;
 static bool wasConnected = false;
 static unsigned long connectedAt = 0;
+static volatile uint16_t connId = 0;
 class Keyboard : public BleKeyboard {
 public:
   Keyboard() : BleKeyboard("K3YBo4rd", "AgonaySS", 100) {}
@@ -13,6 +15,7 @@ public:
     if (!value.empty()) leds = static_cast<uint8_t>(value[0]);
   }
   void onConnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) override {
+    connId = param->connect.conn_id;
     // The core invokes the inherited one-argument callback as well.
     // 15-30 ms interval, no slave latency, 6 s supervision timeout.
     server->updateConnParams(param->connect.remote_bda, 12, 24, 0, 600);
@@ -53,3 +56,8 @@ bool isConnected() {
   }
   return true;
 }
+
+uint16_t bleSendableCount() {
+  return bleKeyboard.isConnected() ? esp_ble_get_cur_sendable_packets_num(connId) : 0;
+}
+bool bleCanSend() { return bleSendableCount() > 0; }

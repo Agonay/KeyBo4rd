@@ -92,6 +92,7 @@ The OS is configured **Spanish (Spain) on ANSI physical**. Characters are produc
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Key spams endlessly on Windows | BLE disconnected while key held → latched report; no release on reconnect. | Guard with `isConnected()`, call `releaseAll()` on reconnect edge, forced release after 2 s. |
+| Lag builds up while typing, key sticks ~2 s then repeats, BLE drops | Bluedroid notifications don't block; reports sent faster than the link piled up inside the stack. | Reports go through a 16-entry queue in `KeyboardMatrix.cpp`, sent only when `bleCanSend()` (`esp_ble_get_cur_sendable_packets_num`). Serial logs `[BLE] heap/sendable/q` every 10 s. |
 | Knob misses volume steps at fast rotation | ISR level-triggered (`LOW`), 1 ms debounce drops transitions, BLE called inside ISR. | ISR fires `CHANGE` on both pins, tiny filter, BLE in loop only. |
 | Spanish chars wrong | `BleKeyboard.press(char)` uses US ASCII map; Spanish-only chars (`ñ ¿ ¡ º`) not in map. | Use Spanish(ES)-on-ANSI layout table with physical HID codes. |
 | E-Ink ghosting / stutter | Full refresh every frame. | Use partial updates + dirty-cooldown. |
