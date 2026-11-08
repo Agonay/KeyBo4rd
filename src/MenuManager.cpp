@@ -25,6 +25,9 @@ static void loadSettings() {
   settings.oledBrightness    = constrain(settings.oledBrightness, 0, 100);
   settings.lowBatteryPct     = constrain(settings.lowBatteryPct, 5, 50);
   if (settings.einkIdleMode >= IdleCount) settings.einkIdleMode = IdleTotoro;
+#if EINK_SHARES_ENCODER_PIN
+  if (settings.einkIdleMode == IdleClock) settings.einkIdleMode = IdleTotoro;
+#endif
 }
 
 void saveSettings() {
@@ -106,6 +109,10 @@ static void adjustItem(ItemId id, int dir) {
       break;
     case IT_IDLE:
       settings.einkIdleMode = (MenuIdleMode)((settings.einkIdleMode + IdleCount + dir) % IdleCount);
+#if EINK_SHARES_ENCODER_PIN
+      if (settings.einkIdleMode == IdleClock)   // clock mode needs a free SPI clock pin
+        settings.einkIdleMode = (MenuIdleMode)((settings.einkIdleMode + IdleCount + dir) % IdleCount);
+#endif
       break;
     default:
       break;
@@ -135,7 +142,7 @@ static void drawHeader(const char *title) {
   oled.print(title);
   char fw[12];
   if (FW_VERSION == 0) snprintf(fw, sizeof(fw), "FW dev");
-  else snprintf(fw, sizeof(fw), "FW v%d", FW_VERSION);
+  else { char v[10]; snprintf(fw, sizeof(fw), "FW v%s", fwVersionLabel(FW_VERSION, v, sizeof(v))); }
   oled.setCursor(126 - (int)strlen(fw) * 6, 1);
   oled.print(fw);
   oled.drawFastHLine(0, 9, 128, SSD1306_WHITE);
@@ -153,7 +160,7 @@ static void drawAbout() {
   int y = 12;
   auto row = [&](const char *text) { oled.setCursor(2, y); oled.print(text); y += 8; };
   if (FW_VERSION == 0) row("Firmware: dev build");
-  else { snprintf(line, sizeof(line), "Firmware: v%d", FW_VERSION); row(line); }
+  else { char v[10]; snprintf(line, sizeof(line), "Firmware: v%s", fwVersionLabel(FW_VERSION, v, sizeof(v))); row(line); }
   String ssid = otaSavedSsid();
   snprintf(line, sizeof(line), "WiFi: %.15s", ssid.length() ? ssid.c_str() : "not set");
   row(line);
@@ -213,40 +220,6 @@ void menuDrawOled() {
   else if (isEditable(cur))   drawFooter("Turn:move Press:edit");
   else                        drawFooter("Turn:move Press:go");
   oled.display();
-}
-
-// ---------- e-ink drawing ----------
-void menuDrawEink() {
-#if ENABLE_EINK
-  char buf[20];
-  einkDisplay.init(115200, true, 50, false);
-  einkDisplay.setRotation(0);
-  einkDisplay.setFullWindow();
-  einkDisplay.firstPage();
-  do {
-    einkDisplay.fillScreen(GxEPD_WHITE);
-    einkDisplay.setTextSize(1);
-    einkDisplay.setTextColor(GxEPD_BLACK);
-    einkDisplay.setCursor(10, 10);
-    einkDisplay.print(F("MENU"));
-    einkDisplay.drawFastHLine(10, 18, 180, GxEPD_BLACK);
-    int y = 30;
-    for (int i = 0; i < ITEM_COUNT; i++) {
-      itemValue(items[i], buf, sizeof(buf));
-      if (i == highlight) {
-        einkDisplay.fillRect(6, y - 8, 188, 16, GxEPD_BLACK);
-        einkDisplay.setTextColor(GxEPD_WHITE);
-      }
-      einkDisplay.setCursor(10, y);
-      einkDisplay.print(itemLabel(items[i]));
-      einkDisplay.print(F(": "));
-      einkDisplay.print(buf);
-      einkDisplay.setTextColor(GxEPD_BLACK);
-      y += 16;
-    }
-  } while (einkDisplay.nextPage());
-  einkDisplay.hibernate();
-#endif
 }
 
 // ---------- public ----------

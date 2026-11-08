@@ -8,6 +8,7 @@ on:
       - "platformio.ini"
       - "scripts/**"
       - ".github/workflows/firmware.yml"
+      - "firmware-version.txt"
   workflow_dispatch:
 
 permissions:
@@ -22,6 +23,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Version = MAJOR.MINOR. MAJOR comes from firmware-version.txt (bump it by hand);
+      # MINOR counts up per release. The device compares MAJOR*1000+MINOR, and the
+      # release tag is fw-<that number> (older firmware builds its download URL from it).
+      - name: Compute version
+        id: ver
+        run: |
+          MAJOR=$(tr -d '[:space:]' < firmware-version.txt)
+          LAST=$(git ls-remote --tags origin 'refs/tags/fw-*' \
+            | sed -nE 's#.*refs/tags/fw-([0-9]+)$#\1#p' \
+            | awk -v M="$MAJOR" '$1 >= M*1000 && $1 < (M+1)*1000 { print $1 - M*1000 }' \
+            | sort -n | tail -1)
+          MINOR=$(( ${LAST:-0} + 1 ))
+          echo "code=$(( MAJOR * 1000 + MINOR ))" >> "$GITHUB_OUTPUT"
+          echo "label=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
+          echo "Version $MAJOR.$MINOR (code $(( MAJOR * 1000 + MINOR )))"
 
       - uses: actions/setup-python@v5
         with:
@@ -38,7 +55,7 @@ jobs:
 
       - name: Build firmware
         env:
-          FW_VERSION: ${{ github.run_number }}
+          FW_VERSION: ${{ steps.ver.outputs.code }}
         run: pio run -e esp32dev
 
       - name: Package release
@@ -49,7 +66,7 @@ jobs:
           SIZE=$(stat -c %s dist/firmware.bin)
           MD5=$(md5sum dist/firmware.bin | cut -d' ' -f1)
           NOTES=$(git log -1 --format=%s)
-          jq -cn --argjson version "${{ github.run_number }}" --arg md5 "$MD5" \
+          jq -cn --argjson version "${{ steps.ver.outputs.code }}" --arg md5 "$MD5" \
             --argjson size "$SIZE" --arg notes "$NOTES" \
             '{version: $version, md5: $md5, size: $size, notes: $notes}' > dist/version.json
           cat dist/version.json
@@ -57,8 +74,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: fw-${{ github.run_number }}
-          name: Firmware v${{ github.run_number }}
+          tag_name: fw-${{ steps.ver.outputs.code }}
+          name: Firmware v${{ steps.ver.outputs.label }}
           target_commitish: ${{ github.sha }}
           make_latest: true
           files: |

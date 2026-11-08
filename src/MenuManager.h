@@ -38,7 +38,6 @@ void menuEventShort();
 void menuEventLong();
 void menuRotate(int dir);
 
-void menuDrawEink();
 void menuDrawOled();
 
 // Redraws on change and handles the inactivity auto-close; call from loop.

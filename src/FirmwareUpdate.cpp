@@ -40,7 +40,7 @@ bool startFirmwareUpdateIfRequested() {
   server.on("/", HTTP_GET, [] {
     String ssid = otaSavedSsid();
     ssid.replace("&", "&amp;"); ssid.replace("<", "&lt;"); ssid.replace("\"", "&quot;");
-    String html = "<h1>K3YBo4rd</h1><p>Running firmware v" + String(FW_VERSION) +
+    String html = "<h1>K3YBo4rd</h1><p>Running firmware v" + fwVersionString(FW_VERSION) +
       (FW_VERSION == 0 ? " (dev build: auto-update off)" : "") + "</p>"
       "<h2>Home Wi-Fi (for automatic updates)</h2><p>Saved network: " +
       (ssid.length() ? ssid : String("<i>none</i>")) + "</p>"

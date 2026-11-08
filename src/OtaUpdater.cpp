@@ -120,7 +120,7 @@ static void updateScreen(const char *title, long toVersion, const String &status
   oled.setTextColor(SSD1306_BLACK);
   drawCentered(title, 2, 1);
   oled.setTextColor(SSD1306_WHITE);
-  const String ver = toVersion > 0 ? String("v") + FW_VERSION + " -> v" + toVersion : String("");
+  const String ver = toVersion > 0 ? String("v") + fwVersionString(FW_VERSION) + " -> v" + fwVersionString(toVersion) : String("");
   int statusY = 34, barY = 44;
   if (screenNotes.length() && toVersion > 0) {
     drawCentered(ver, 13, 1);
@@ -243,7 +243,7 @@ static bool fetchManifestOnce(Manifest &m) {
     lastError = "Bad release info";
     return false;
   }
-  Serial.printf("[OTA] latest v%ld, running v%d\n", m.version, FW_VERSION);
+  Serial.printf("[OTA] latest v%s, running v%s\n", fwVersionString(m.version).c_str(), fwVersionString(FW_VERSION).c_str());
   return true;
 }
 
@@ -340,7 +340,7 @@ static bool downloadAndFlash(const Manifest &m) {
 static unsigned long lastCheckAt = 0;
 
 void otaBootCheck() {
-  Serial.printf("[OTA] firmware v%d%s\n", FW_VERSION,
+  Serial.printf("[OTA] firmware v%s%s\n", fwVersionString(FW_VERSION).c_str(),
                 FW_VERSION == 0 ? " (dev build, auto-update off)" : "");
   const CheckReason reason = takeCheckReason();
   const bool manual = reason == CHECK_MANUAL;
@@ -385,7 +385,7 @@ void otaBootCheck() {
 
   if (found) {
     setStatus("Failed");
-    updateScreen("UPDATE FAILED", -1, lastError, -1, (String("Still on v") + FW_VERSION).c_str());
+    updateScreen("UPDATE FAILED", -1, lastError, -1, (String("Still on v") + fwVersionString(FW_VERSION)).c_str());
     delay(3000);
   } else if (!checked) {
     setStatus(lastError.startsWith("Wi-Fi") ? "No WiFi" : "Failed");
@@ -397,7 +397,7 @@ void otaBootCheck() {
   } else {
     setStatus("Latest");
     if (manual) {
-      updateScreen("UP TO DATE", -1, String("v") + FW_VERSION + " is the latest", -1, nullptr);
+      updateScreen("UP TO DATE", -1, String("v") + fwVersionString(FW_VERSION) + " is the latest", -1, nullptr);
       delay(2000);
     }
   }

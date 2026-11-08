@@ -7,6 +7,7 @@
 #include "totoro_200x200_1b.h"
 #include "HardwareConfig.h"
 #include "OtaUpdater.h"
+#include "RotaryEncoder.h"
 
 #define ENABLE_GxEPD2_GFX 0
 
@@ -36,8 +37,31 @@ static const unsigned long idleCooldownMs = 300000; // 5 min between full redraw
 static unsigned long lastDrawnSecond = 0;
 static bool clockNeedsUpdate = false;
 
+// SPI owns GPIO18 only between einkWake() and einkSleep(); the rest of the time
+// it's the encoder's CLK input (see HardwareConfig.h).
+static bool einkBusHeld = false;
+
+static void einkAcquireBus() {
+  if (einkBusHeld) return;
+#if EINK_SHARES_ENCODER_PIN
+  encoderSuspend();
+#endif
+  SPI.begin(EINK_SCK, -1, EINK_MOSI, CS_PIN);
+  einkBusHeld = true;
+}
+
+static void einkReleaseBus() {
+#if EINK_SHARES_ENCODER_PIN
+  if (!einkBusHeld) return;
+  SPI.end();          // detaches SCK/MOSI and leaves them as inputs
+  einkBusHeld = false;
+  encoderResume();
+#endif
+}
+
 static void einkWake() {
   if (!einkIsAwake && einkInitialized) {
+    einkAcquireBus();
     einkDisplay.init(115200, true, 50, false);
     einkIsAwake = true;
   }
@@ -48,6 +72,7 @@ static void einkSleep() {
     einkDisplay.hibernate();
     einkIsAwake = false;
   }
+  einkReleaseBus();
 }
 
 static void serviceKeyboardDuringRefresh(const void*) {
@@ -124,7 +149,7 @@ static void drawSplashFrame(int nameChars, bool cursorOn, int wavePos, int pct, 
 
   char fw[12];
   if (FW_VERSION == 0) snprintf(fw, sizeof(fw), "dev build");
-  else snprintf(fw, sizeof(fw), "v%d", FW_VERSION);
+  else { fw[0] = 'v'; fwVersionLabel(FW_VERSION, fw + 1, sizeof(fw) - 1); }
   printCentered(57, fw);
   oled.display();
 }
@@ -157,10 +182,10 @@ void initDisplay() {
   playBootAnimation();
   bootSplashStatus("Starting...", 20);
 #if ENABLE_EINK
-  SPI.begin(EINK_SCK, -1, EINK_MOSI, CS_PIN);
   einkDisplay.epd2.setBusyCallback(serviceKeyboardDuringRefresh);
-  // E-Ink boot: show Totoro, then hibernate
-  einkDisplay.init(115200, true, 50, false);
+  // E-Ink boot: show Totoro, then hibernate (encoder isn't attached yet)
+  einkInitialized = true;
+  einkWake();
   einkDisplay.setRotation(0);
   einkDisplay.setFullWindow();
   int x = (einkDisplay.width()  - totoro_200x200_1b_width)  / 2;
@@ -170,11 +195,10 @@ void initDisplay() {
     einkDisplay.fillScreen(GxEPD_WHITE);
     einkDisplay.drawBitmap(x, y, totoro_200x200_1b, totoro_200x200_1b_width, totoro_200x200_1b_height, GxEPD_BLACK);
   } while (einkDisplay.nextPage());
-  einkDisplay.hibernate();
+  einkSleep();
+  Serial.println(F("[EINK] boot image drawn"));
 
-  einkInitialized = true;
-  einkIsAwake = false;
-  currentIdleMode = (MenuIdleMode)255; // sentinel: force first renderIdleScreen call
+  currentIdleMode = IdleTotoro;        // the panel shows Totoro now; other modes redraw on the first idle
   lastOledBrt     = getSettings().oledBrightness;
   lastDrawnSecond = 0;
 #endif
@@ -480,6 +504,9 @@ void renderIdleScreen() {
   if (!einkInitialized) return;
 
   MenuIdleMode mode = getSettings().einkIdleMode;
+#if EINK_SHARES_ENCODER_PIN
+  if (mode == IdleClock) mode = IdleTotoro;   // a redraw every 10 s would keep pausing the knob
+#endif
 
   // Clock mode: update every 10 seconds, keep display awake
   if (mode == IdleClock) {
@@ -501,9 +528,11 @@ void renderIdleScreen() {
     lastDrawnSecond = 0;
   }
 
-  // Other modes: only redraw on mode change + cooldown
+  // Other modes: only redraw on mode change, and not while the keys or knob are in use
+  // (the knob is paused during a refresh).
   unsigned long sinceKey = millis() - getLastKeyActivityTime();
   if (sinceKey < 3000 && getLastKeyActivityTime() > 0) return;
+  if (millis() - getLastKnobActivityTime() < 3000 && getLastKnobActivityTime() > 0) return;
   if (mode == currentIdleMode) return;
 
   unsigned long now = millis();

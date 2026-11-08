@@ -226,15 +226,31 @@ void handleRotaryEncoder() {
   lastDet += (det > lastDet ? steps : -steps);
 }
 
-void initRotaryEncoder() {
+static bool encoderReady = false;
+static bool encoderAttached = false;
+
+void encoderSuspend() {
+  if (!encoderAttached) return;
+  detachInterrupt(digitalPinToInterrupt(CLK_PIN));
+  detachInterrupt(digitalPinToInterrupt(DT_PIN));
+  encoderAttached = false;
+}
+
+void encoderResume() {
+  if (!encoderReady || encoderAttached) return;
   pinMode(CLK_PIN, INPUT);
   pinMode(DT_PIN,  INPUT);
-  pinMode(SW_PIN,  INPUT_PULLUP);
-
   prevAB = (digitalRead(CLK_PIN) << 1) | digitalRead(DT_PIN);
-
+  detentAnchor = encoderTicks;   // a half-turn made while paused must not count
   attachInterrupt(digitalPinToInterrupt(CLK_PIN), encoderISR, CHANGE);
   attachInterrupt(digitalPinToInterrupt(DT_PIN),  encoderISR, CHANGE);
+  encoderAttached = true;
+}
+
+void initRotaryEncoder() {
+  pinMode(SW_PIN, INPUT_PULLUP);
+  encoderReady = true;
+  encoderResume();
 
   Serial.println(F("encoder initialized (counts on rest position)"));
 }

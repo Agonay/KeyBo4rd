@@ -8,10 +8,10 @@ ESP32 custom mechanical keyboard with BLE HID, 6×13 matrix, rotary encoder knob
 |---|---|---|
 | **Matrix rows** (ESP32 GPIO, INPUT_PULLUP) | 25, 33, 12, 26, 27, 14 | Row scan lines |
 | **Matrix cols** (PCF8575 I2C expander, addr 0x20) | P15 P13 P4 P1 P3 P7 P5 P6 P11 P0 P2 P14 P12 | Column drivers |
-| **Rotary encoder CLK** | 18 | Quadrature A |
+| **Rotary encoder CLK** | 18 (shared with E-Ink SCK) | Quadrature A |
 | **Rotary encoder DT** | 19 | Quadrature B |
 | **Rotary encoder SW** | 13 | Push button (active-LOW, PULLUP) |
-| **E-Ink (GxEPD2 1.54" D67)** | CS=5 BUSY=15 RES=17 DC=16 | Static image / menu / dashboard |
+| **E-Ink (GxEPD2 1.54" D67)** | SCK=18 (shared) MOSI=23 CS=5 BUSY=15 RES=17 DC=16 | Boot image / idle screens |
 | **OLED (SSD1306 128×64)** | I2C 0x3C | Boot splash, home screen (BT, battery, WPM graph, caps, key count, uptime), menu |
 | **I2C bus** | SDA=21 SCL=22 (default Wire) | OLED + PCF8575 |
 
@@ -117,7 +117,7 @@ Editing:    turn right = +, turn left = -   press = save   hold = cancel (revert
             The edited value shows as <value>. Auto-close after 20 s without input.
 
 Items: Volume step (1-4), Direction, OLED bright (0-100%, live preview),
-       Show battery, Low battery (5-50%), Idle screen (only if ENABLE_EINK),
+       Show battery, Low battery (5-50%), Idle screen (Totoro/Status/Animation),
        Check update (checks GitHub now, installs immediately if newer),
        About (firmware, Wi-Fi, IP, Bluetooth, uptime), < Exit
 Header shows the firmware version (FW vN / FW dev).
@@ -130,7 +130,7 @@ Header shows the firmware version (FW vN / FW dev).
 
 ## Firmware updates (OTA from GitHub)
 
-- **Release flow:** a push to `master` that touches `src/**`, `platformio.ini` or `scripts/**` runs `.github/workflows/firmware.yml`. It builds with `FW_VERSION=<run number>` and publishes the release `fw-N` with `firmware.bin` and `version.json` (`{"version","md5","size","notes"}`; `notes` = commit title, shown on the update screen).
+- **Release flow:** a push to `master` that touches `src/**`, `platformio.ini` or `scripts/**` runs `.github/workflows/firmware.yml`. Versions are `MAJOR.MINOR`: MAJOR is in `firmware-version.txt` (bump by hand), MINOR counts up per release. The integer code is `MAJOR*1000+MINOR` (6.1 = 6001), used for `FW_VERSION`, the `version.json` `version` field and the tag `fw-<code>` (the release is named `Firmware v6.1`). Old firmware (≤ v6) builds the download URL from that tag, so keep the tag format. It publishes `firmware.bin` and `version.json` (`{"version","md5","size","notes"}`; `notes` = commit title, shown on the update screen).
 - **Device side (`OtaUpdater.{h,cpp}`):**
   - `otaBootCheck()` runs before `initBluetooth()`. It joins Wi-Fi, reads `releases/latest/download/version.json`, and if the release is newer, streams `firmware.bin` into the spare OTA slot (MD5-checked) and reboots.
   - Checks only run in the boot path. With BLE up there are ~60 KB free, Wi-Fi init leaves ~25 KB, and the TLS handshake fails ("X509 - Allocation of memory failed"); BLE memory can't be freed without a restart.
@@ -141,4 +141,5 @@ Header shows the firmware version (FW vN / FW dev).
 - **Wi-Fi credentials** live in NVS (`kbd`/`wifiSsid`, `wifiPass`). To set them, hold the knob at power-on. The OLED shows the hotspot password; open `http://192.168.4.1` and fill in the Wi-Fi form. The same page has a manual `.bin` upload for recovery.
 - **Dev builds:** local builds have `FW_VERSION=0` (`scripts/fw_version.py`), which turns auto-update off, so USB-flashed test firmware is not overwritten.
 - **TLS roots:** `GithubRootCAs.h` pins the Sectigo/USERTrust (github.com), ISRG/Let's Encrypt (release-assets host) and DigiCert roots. If GitHub changes CA, update this file.
+- **E-Ink / knob pin sharing:** the E-Ink SCK and the encoder CLK are both wired to GPIO18. `einkWake()` suspends the encoder interrupts and attaches SPI; `einkSleep()` hibernates the panel, calls `SPI.end()` and resumes the encoder. The knob doesn't respond during a refresh (~2-3 s), so idle redraws wait 3 s after the last key/knob input, and Clock mode is disabled. Moving the E-Ink SCK wire to a free GPIO and setting `EINK_SCK` (`HardwareConfig.h`) removes the sharing.
 - **No automatic rollback:** a release that crashes at boot needs a USB reflash. Flash usage is ~92% of the 1.9 MB OTA slot.
