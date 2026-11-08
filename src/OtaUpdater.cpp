@@ -17,8 +17,7 @@ static const char *MANIFEST_URL =
 
 static const unsigned long IDLE_BEFORE_CHECK_MS = 4UL * 60UL * 1000UL;
 static const unsigned long MIN_CHECK_INTERVAL_MS = 60UL * 60UL * 1000UL;
-static const unsigned long INSTALL_COUNTDOWN_MS = 10UL * 1000UL;
-static const uint32_t MIN_FREE_HEAP_FOR_TLS = 60000;
+static const unsigned long CHECK_COUNTDOWN_MS = 10UL * 1000UL;
 static const char *NS = "kbd";
 
 struct Manifest {
@@ -54,21 +53,26 @@ void otaSaveWifiCredentials(const String &ssid, const String &pass) {
   p.end();
 }
 
-// Version found by the idle check; the boot path installs it. 0 = none.
-static void setPendingVersion(long v) {
+// With BLE running there isn't enough RAM for Wi-Fi + TLS (measured: 60 KB free,
+// 25 KB after Wi-Fi init; the TLS handshake fails). So checks always run in the
+// boot path: the menu/idle trigger stores a reason in NVS and reboots.
+enum CheckReason : uint8_t { CHECK_NONE = 0, CHECK_IDLE = 1, CHECK_MANUAL = 2 };
+
+static void setCheckReason(CheckReason r) {
   Preferences p;
   p.begin(NS, false);
-  p.putLong("otaPendV", v);
+  p.putUChar("otaChk", r);
   p.end();
 }
 
-static long takePendingVersion() {
+static CheckReason takeCheckReason() {
   Preferences p;
   p.begin(NS, false);
-  const long v = p.getLong("otaPendV", 0);
-  if (v) p.putLong("otaPendV", 0);
+  const CheckReason r = (CheckReason)p.getUChar("otaChk", CHECK_NONE);
+  if (r != CHECK_NONE) p.putUChar("otaChk", CHECK_NONE);
+  if (p.isKey("otaPendV")) p.remove("otaPendV");  // key from older firmware
   p.end();
-  return v;
+  return r;
 }
 
 // Local USB builds can carry credentials in the gitignored src/WifiSecrets.h;
@@ -158,13 +162,17 @@ static bool wifiConnect(unsigned long timeoutMs) {
   p.end();
   if (!ssid.length()) return false;
 
-  WiFi.mode(WIFI_STA);
+  Serial.printf("[OTA] Wi-Fi start: heap %u, largest block %u\n",
+                ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  const bool modeOk = WiFi.mode(WIFI_STA);
   WiFi.setSleep(true);  // modem sleep is required for Wi-Fi + BLE coexistence
-  WiFi.begin(ssid.c_str(), pass.c_str());
+  const wl_status_t beginSt = WiFi.begin(ssid.c_str(), pass.c_str());
+  Serial.printf("[OTA] mode ok=%d begin=%d heap after init %u\n", modeOk, beginSt, ESP.getFreeHeap());
   const unsigned long t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) delay(100);
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.printf("[OTA] Wi-Fi '%s' not reachable\n", ssid.c_str());
+    Serial.printf("[OTA] Wi-Fi '%s' not reachable (status %d after %lu ms)\n",
+                  ssid.c_str(), WiFi.status(), millis() - t0);
     lastError = "Wi-Fi not reachable";
     return false;
   }
@@ -210,7 +218,7 @@ static String jsonStr(const String &s, const char *key) {
   return out;
 }
 
-static bool fetchManifest(Manifest &m) {
+static bool fetchManifestOnce(Manifest &m) {
   WiFiClientSecure client;
   client.setCACert(GITHUB_ROOT_CAS);
   HTTPClient http;
@@ -237,6 +245,15 @@ static bool fetchManifest(Manifest &m) {
   }
   Serial.printf("[OTA] latest v%ld, running v%d\n", m.version, FW_VERSION);
   return true;
+}
+
+static bool fetchManifest(Manifest &m) {
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (attempt) delay(1500);
+    lastError = "";
+    if (fetchManifestOnce(m)) return true;
+  }
+  return false;
 }
 
 // ---------- download + flash ----------
@@ -325,20 +342,36 @@ static unsigned long lastCheckAt = 0;
 void otaBootCheck() {
   Serial.printf("[OTA] firmware v%d%s\n", FW_VERSION,
                 FW_VERSION == 0 ? " (dev build, auto-update off)" : "");
-  const long pending = takePendingVersion();
+  const CheckReason reason = takeCheckReason();
+  const bool manual = reason == CHECK_MANUAL;
   lastCheckAt = millis();
   seedWifiFromSecrets();
 
-  if (FW_VERSION == 0 || !otaHasWifiCredentials() || !batteryOkForUpdate()) return;
+  // Dev builds only check when asked from the menu.
+  if ((FW_VERSION == 0 && !manual) || !batteryOkForUpdate()) return;
+  if (!otaHasWifiCredentials()) {
+    setStatus("No WiFi set");
+    if (manual) {
+      updateScreen("UPDATE CHECK", -1, "No Wi-Fi configured", -1, "Hold knob at boot");
+      delay(3000);
+      closeUpdateScreen();
+    }
+    return;
+  }
 
   lastError = "";
-  if (pending > FW_VERSION)
-    updateScreen("FIRMWARE UPDATE", pending, "Connecting to Wi-Fi...", -1, "Don't unplug");
+  if (manual) updateScreen("UPDATE CHECK", -1, "Connecting to Wi-Fi...", -1, nullptr);
 
   Manifest m;
-  bool tried = false;
-  if (wifiConnect(8000) && fetchManifest(m) && m.version > FW_VERSION) {
-    tried = true;
+  bool found = false;
+  bool checked = false;
+  if (wifiConnect(8000)) {
+    if (manual) updateScreen("UPDATE CHECK", -1, "Asking GitHub...", -1, nullptr);
+    checked = fetchManifest(m);
+    found = checked && m.version > FW_VERSION;
+  }
+
+  if (found) {
     screenNotes = m.notes;
     updateScreen("FIRMWARE UPDATE", m.version, "Starting download...", 0, "Don't unplug");
     if (downloadAndFlash(m)) {
@@ -350,49 +383,30 @@ void otaBootCheck() {
   }
   wifiOff();
 
-  if (tried || pending > FW_VERSION) {
-    updateScreen("UPDATE FAILED", -1, lastError.length() ? lastError : String("No update found"),
-                 -1, (String("Still on v") + FW_VERSION).c_str());
+  if (found) {
+    setStatus("Failed");
+    updateScreen("UPDATE FAILED", -1, lastError, -1, (String("Still on v") + FW_VERSION).c_str());
     delay(3000);
+  } else if (!checked) {
+    setStatus(lastError.startsWith("Wi-Fi") ? "No WiFi" : "Failed");
+    if (manual) {
+      updateScreen("UPDATE CHECK", -1, lastError.length() ? lastError : String("Check failed"),
+                   -1, "Try again later");
+      delay(3000);
+    }
+  } else {
+    setStatus("Latest");
+    if (manual) {
+      updateScreen("UP TO DATE", -1, String("v") + FW_VERSION + " is the latest", -1, nullptr);
+      delay(2000);
+    }
   }
   if (screenActive) closeUpdateScreen();
 }
 
-// ---------- idle path (BLE running) ----------
-static volatile bool checkRunning = false;
-static volatile long foundVersion = 0;      // set by the background task
-static volatile bool manualCheck = false;   // started from the menu
-static String foundNotes;
+// ---------- triggers while running (BLE up) ----------
 static unsigned long countdownStart = 0;
 static int countdownShown = -1;
-
-static void idleCheckTask(void *) {
-  long newer = 0;
-  const uint32_t heap = ESP.getFreeHeap();
-  if (heap < MIN_FREE_HEAP_FOR_TLS) {
-    Serial.printf("[OTA] skip check, free heap %u\n", heap);
-    setStatus("Low memory");
-  } else if (!wifiConnect(10000)) {
-    setStatus("No WiFi");
-  } else {
-    Manifest m;
-    if (!fetchManifest(m)) {
-      setStatus("Failed");
-    } else if (m.version > FW_VERSION) {
-      newer = m.version;
-      foundNotes = m.notes;
-      char b[16];
-      snprintf(b, sizeof(b), "v%ld found", m.version);
-      setStatus(b);
-    } else {
-      setStatus("Latest");
-    }
-  }
-  wifiOff();
-  if (newer) foundVersion = newer;
-  checkRunning = false;
-  vTaskDelete(nullptr);
-}
 
 static unsigned long lastActivity() {
   const unsigned long k = getLastKeyActivityTime();
@@ -400,75 +414,45 @@ static unsigned long lastActivity() {
   return (long)(k - r) > 0 ? k : r;
 }
 
-static bool startCheckTask() {
-  checkRunning = true;
-  setStatus("Checking");
-  if (xTaskCreatePinnedToCore(idleCheckTask, "otaCheck", 12288, nullptr, 1, nullptr, 0) != pdPASS) {
-    checkRunning = false;
-    setStatus("Failed");
-    return false;
-  }
-  return true;
-}
-
-void otaCheckNow() {
-  if (checkRunning) return;
-  if (!otaHasWifiCredentials()) { setStatus("No WiFi set"); return; }
-  manualCheck = true;
-  lastCheckAt = millis();
-  if (!startCheckTask()) manualCheck = false;
-}
-
-static void installNow(long version) {
-  setPendingVersion(version);
-  screenNotes = foundNotes;
-  updateScreen("FIRMWARE UPDATE", version, "Restarting to install", 100, "Don't unplug");
+static void rebootIntoCheck(CheckReason reason) {
+  setCheckReason(reason);
   if (bleKeyboard.isConnected()) bleKeyboard.releaseAll();
-  delay(500);
+  delay(300);
   ESP.restart();
 }
 
+void otaCheckNow() {
+  if (!otaHasWifiCredentials()) { setStatus("No WiFi set"); return; }
+  if (isMenuOpen()) menuClose();
+  updateScreen("UPDATE CHECK", -1, "Restarting to check...", -1, "Bluetooth reconnects");
+  delay(800);
+  rebootIntoCheck(CHECK_MANUAL);
+}
+
 void otaLoop() {
-  if (checkRunning) return;
-  const unsigned long now = millis();
-
-  // Manual check from the menu: install immediately, no countdown.
-  if (manualCheck) {
-    manualCheck = false;
-    if (foundVersion) {
-      if (isMenuOpen()) menuClose();
-      installNow(foundVersion);
-    }
-    return;
-  }
-
   if (FW_VERSION == 0) return;   // dev build: no automatic checks
+  const unsigned long now = millis();
   const bool idle = now - lastActivity() >= IDLE_BEFORE_CHECK_MS && !isMenuOpen();
 
-  // An update was found: show a countdown; any key or knob use postpones it
-  // until the next idle window.
-  if (foundVersion) {
-    if (!countdownStart) {
-      if (!idle) return;
-      countdownStart = now;
-      countdownShown = -1;
-      Serial.printf("[OTA] v%ld ready, installing in %lus unless a key is pressed\n",
-                    (long)foundVersion, INSTALL_COUNTDOWN_MS / 1000);
-    }
+  // Idle check due: 10 s countdown, any key or knob use postpones it until the
+  // next idle window, then reboot and check in the boot path.
+  if (countdownStart) {
     if ((long)(lastActivity() - countdownStart) > 0 || isMenuOpen()) {
-      Serial.println("[OTA] install postponed (activity)");
+      Serial.println("[OTA] update check postponed (activity)");
       countdownStart = 0;
       closeUpdateScreen();
       return;
     }
     const unsigned long elapsed = now - countdownStart;
-    if (elapsed >= INSTALL_COUNTDOWN_MS) installNow(foundVersion);
-    const int left = (INSTALL_COUNTDOWN_MS - elapsed + 999) / 1000;
+    if (elapsed >= CHECK_COUNTDOWN_MS) {
+      updateScreen("UPDATE CHECK", -1, "Restarting to check...", 100, nullptr);
+      rebootIntoCheck(CHECK_IDLE);
+    }
+    const int left = (CHECK_COUNTDOWN_MS - elapsed + 999) / 1000;
     if (left != countdownShown) {
       countdownShown = left;
-      screenNotes = foundNotes;
-      updateScreen("UPDATE READY", foundVersion, String("Installing in ") + left + "s",
-                   (int)(elapsed * 100 / INSTALL_COUNTDOWN_MS), "Press any key to wait");
+      updateScreen("UPDATE CHECK", -1, String("Restarting in ") + left + "s",
+                   (int)(elapsed * 100 / CHECK_COUNTDOWN_MS), "Press any key to wait");
     }
     return;
   }
@@ -476,5 +460,7 @@ void otaLoop() {
   if (!idle || now - lastCheckAt < MIN_CHECK_INTERVAL_MS) return;
   if (!otaHasWifiCredentials() || !batteryOkForUpdate()) return;
   lastCheckAt = now;
-  startCheckTask();
+  countdownStart = now;
+  countdownShown = -1;
+  Serial.println("[OTA] idle: rebooting to check for updates in 10 s unless a key is pressed");
 }
