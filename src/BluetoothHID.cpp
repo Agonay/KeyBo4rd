@@ -21,7 +21,15 @@ public:
     server->updateConnParams(param->connect.remote_bda, 12, 24, 0, 600);
     BLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_CONN_HDL0);
   }
+  void onDisconnect(BLEServer* server, esp_ble_gatts_cb_param_t* param) override {
+    // 0x08 = supervision timeout (radio link lost), 0x13 = host closed it,
+    // 0x22/0x3E = link-layer failure. Logged from the BLE task; no BLE calls here.
+    disconnectReason = param->disconnect.reason;
+  }
+public:
+  static volatile int disconnectReason;
 };
+volatile int Keyboard::disconnectReason = -1;
 static Keyboard keyboard;
 BleKeyboard& bleKeyboard = keyboard;
 
@@ -34,7 +42,8 @@ bool isCapsFromHost() { return (leds & 2) != 0; }
 bool isConnected() {
   const bool connected = bleKeyboard.isConnected();
   if (!connected) {
-    if (wasConnected) Serial.println("[BLE] disconnected; advertising restarted");
+    if (wasConnected) Serial.printf("[BLE] disconnected (reason 0x%02X, heap %u); advertising restarted\n",
+                                    Keyboard::disconnectReason & 0xFF, ESP.getFreeHeap());
     wasConnected = false;
     leds = 0;
     return false;

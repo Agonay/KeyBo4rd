@@ -65,21 +65,33 @@ static KeyReport reportQueue[QUEUE_LEN];
 static unsigned qHead = 0, qCount = 0;
 static unsigned long lastSendMs = 0;
 static uint32_t qCollapsed = 0;
+static unsigned long queuedAt[QUEUE_LEN];
+
+// Diagnostics, reset every log line: where does the time go when keys lag?
+static unsigned long maxScanGap = 0;   // loop blocked: keys aren't even read
+static unsigned long maxWait = 0;      // report waited for the BLE stack: link slow
+static unsigned maxQ = 0;
 
 static void queueClear() { qHead = qCount = 0; }
 
-static void queuePush(const KeyReport &r) {
+static void queuePush(const KeyReport &r, unsigned long now) {
   if (qCount == QUEUE_LEN) {
     reportQueue[(qHead + qCount - 1) % QUEUE_LEN] = r;
     ++qCollapsed;
     return;
   }
-  reportQueue[(qHead + qCount) % QUEUE_LEN] = r;
+  const unsigned slot = (qHead + qCount) % QUEUE_LEN;
+  reportQueue[slot] = r;
+  queuedAt[slot] = now;
   ++qCount;
+  if (qCount > maxQ) maxQ = qCount;
 }
 
 static void drainReports(unsigned long now) {
   if (!qCount || now - lastSendMs < MIN_SEND_GAP_MS || !bleCanSend()) return;
+  const unsigned long waited = now - queuedAt[qHead];
+  if (waited > maxWait) maxWait = waited;
+  if (waited >= 150) Serial.printf("[DIAG] report waited %lu ms for the BLE stack (q=%u)\n", waited, qCount);
   bleKeyboard.sendReport(&reportQueue[qHead]);
   qHead = (qHead + 1) % QUEUE_LEN;
   --qCount;
@@ -90,9 +102,11 @@ static void logLinkStats(unsigned long now) {
   static unsigned long lastLog = 0;
   if (now - lastLog < 10000) return;
   lastLog = now;
-  Serial.printf("[BLE] heap=%u minHeap=%u sendable=%u q=%u collapsed=%lu\n",
-                ESP.getFreeHeap(), ESP.getMinFreeHeap(), bleSendableCount(), qCount,
-                (unsigned long)qCollapsed);
+  Serial.printf("[BLE] heap=%u minHeap=%u sendable=%u q=%u maxQ=%u maxWait=%lums "
+                "maxScanGap=%lums collapsed=%lu keys=%lu\n",
+                ESP.getFreeHeap(), ESP.getMinFreeHeap(), bleSendableCount(), qCount, maxQ,
+                maxWait, maxScanGap, (unsigned long)qCollapsed, (unsigned long)keyPressCount);
+  maxQ = 0; maxWait = 0; maxScanGap = 0;
 }
 
 void initKeyboardMatrix() {
@@ -108,6 +122,11 @@ void initKeyboardMatrix() {
 void scanKeyboardMatrix() {
   const unsigned long now = millis();
   if (!matrixReady || now - lastScanTime < 4) return;
+  if (lastScanTime) {
+    const unsigned long gap = now - lastScanTime;
+    if (gap > maxScanGap) maxScanGap = gap;
+    if (gap >= 150) Serial.printf("[DIAG] keyboard scan blocked for %lu ms\n", gap);
+  }
   lastScanTime = now;
   bool anyDown = false;
   for (int col = 0; col < numColsPCF; ++col) {
@@ -159,7 +178,7 @@ void scanKeyboardMatrix() {
   }
   if (count > 6) memset(report.keys, 1, sizeof(report.keys)); // HID ErrorRollOver
   if (memcmp(&report, &lastReport, sizeof(report)) != 0) {
-    queuePush(report);
+    queuePush(report, now);
     lastReport = report;
   }
   drainReports(now);
