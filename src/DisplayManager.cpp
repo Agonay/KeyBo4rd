@@ -9,6 +9,7 @@
 #include "OtaUpdater.h"
 #include "RotaryEncoder.h"
 #include "HomeControl.h"
+#include "EinkAnimation.h"
 
 #define ENABLE_GxEPD2_GFX 0
 
@@ -42,7 +43,7 @@ static bool clockNeedsUpdate = false;
 // it's the encoder's CLK input (see HardwareConfig.h).
 static bool einkBusHeld = false;
 
-static void einkAcquireBus() {
+void einkAcquireBus() {
   if (einkBusHeld) return;
 #if EINK_SHARES_ENCODER_PIN
   encoderSuspend();
@@ -51,7 +52,7 @@ static void einkAcquireBus() {
   einkBusHeld = true;
 }
 
-static void einkReleaseBus() {
+void einkReleaseBus() {
 #if EINK_SHARES_ENCODER_PIN
   if (!einkBusHeld) return;
   SPI.end();          // detaches SCK/MOSI and leaves them as inputs
@@ -60,7 +61,9 @@ static void einkReleaseBus() {
 #endif
 }
 
-static void einkWake() {
+bool einkReady() { return einkInitialized; }
+
+void einkWake() {
   if (!einkIsAwake && einkInitialized) {
     einkAcquireBus();
     einkDisplay.init(115200, true, 50, false);
@@ -68,8 +71,9 @@ static void einkWake() {
   }
 }
 
-static void einkSleep() {
+void einkSleep() {
   if (einkIsAwake) {
+    einkAcquireBus();   // the animation releases SPI between frames; hibernate needs it
     einkDisplay.hibernate();
     einkIsAwake = false;
   }
@@ -509,35 +513,6 @@ static void drawEinkStatusDashboard() {
 
 // ---------- E-Ink idle screen ----------
 
-static void drawRainIdleScreen() {
-  if (!einkInitialized) return;
-  einkWake();
-  einkDisplay.setFullWindow();
-  einkDisplay.firstPage();
-  do {
-    einkDisplay.fillScreen(GxEPD_WHITE);
-    einkDisplay.setTextSize(1);
-    einkDisplay.setTextColor(GxEPD_BLACK);
-
-    int w = einkDisplay.width(), h = einkDisplay.height();
-    einkDisplay.drawLine(0, h - 40, w, h - 40, GxEPD_BLACK);
-
-    einkDisplay.fillRoundRect(40, 10, 120, 30, 10, GxEPD_BLACK);
-    einkDisplay.fillRoundRect(60, 0, 80, 20, 10, GxEPD_BLACK);
-
-    randomSeed(42);
-    for (int i = 0; i < 40; i++) {
-      int rx = random(10, w - 80);
-      int ry = random(50, h - 50);
-      int rl = random(6, 14);
-      einkDisplay.drawLine(rx, ry, rx - 2, ry + rl, GxEPD_BLACK);
-    }
-
-    einkDisplay.setCursor(60, h - 25);
-    einkDisplay.print(F("Rainy day"));
-  } while (einkDisplay.nextPage());
-}
-
 // ---------- E-Ink Home panel ----------
 // Device list for the Fn layer. One full refresh (~2 s) on entering Home mode
 // or switching device; live state goes to the OLED, which is fast.
@@ -590,8 +565,8 @@ static void drawEinkHomePanel() {
 }
 
 void renderIdleScreen() {
-  if (isMenuOpen()) return;
   if (!einkInitialized) return;
+  if (isMenuOpen() || otaScreenActive()) { einkAnimStop(); return; }
 
   // Home mode owns the panel; leaving it forces the idle screen to come back.
   static uint32_t drawnHomePanel = 0;
@@ -599,6 +574,7 @@ void renderIdleScreen() {
   static unsigned long homePanelChangedAt = 0;
   if (homePanelVersion() != seenHomePanel) { seenHomePanel = homePanelVersion(); homePanelChangedAt = millis(); }
   if (homeModeActive()) {
+    einkAnimStop();
     // wait a moment so a quick Fn+1, Fn+2 costs one refresh, not two
     if (drawnHomePanel != seenHomePanel && millis() - homePanelChangedAt > 250) {
       drawnHomePanel = seenHomePanel;
@@ -615,6 +591,18 @@ void renderIdleScreen() {
 #if EINK_SHARES_ENCODER_PIN
   if (mode == IdleClock) mode = IdleTotoro;   // a redraw every 10 s would keep pausing the knob
 #endif
+
+  // Animation mode: one frame per call while idle (see EinkAnimation.cpp)
+  if (mode == IdleAnimation) {
+    if (currentIdleMode != IdleAnimation) {
+      currentIdleMode = IdleAnimation;
+      einkAnimReset();
+      Serial.println(F("[EINK] mode->Animation"));
+    }
+    einkAnimTick();
+    return;
+  }
+  einkAnimStop();
 
   // Clock mode: update every 10 seconds, keep display awake
   if (mode == IdleClock) {
@@ -666,10 +654,6 @@ void renderIdleScreen() {
     }
     case IdleStatus:
       drawEinkStatusDashboard();
-      break;
-    case IdleAnimation:
-      drawRainIdleScreen();
-      einkSleep();
       break;
     default:
       break;
