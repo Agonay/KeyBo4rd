@@ -2,7 +2,7 @@
 #include <stdint.h>
 // USB HID usages, never ASCII. Windows must use Spanish (Spain).
 struct Key { uint8_t usage; uint8_t modifiers; constexpr Key(uint8_t u, uint8_t m = 0) : usage(u), modifiers(m) {} };
-struct KeyState { bool isPressed = false; bool lastRawState = false; unsigned long stateChangeTime = 0; };
+struct KeyState { bool isPressed = false; bool lastRawState = false; unsigned long stateChangeTime = 0; bool fnConsumed = false; };
 constexpr Key Key_A = {0x04};
 constexpr Key Key_B = {0x05};
 constexpr Key Key_C = {0x06};
@@ -85,3 +85,5 @@ constexpr Key Key_Ctrl = {0, 0x01};
 constexpr Key Key_Cmd = {0, 0x08};
 constexpr Key Key_Left_Alt = {0, 0x04};
 constexpr Key Key_Right_Alt = {0, 0x40};
+// Fn: handled on the keyboard (Fn layer), never sent to the host.
+constexpr Key Key_Fn = {0, 0};

@@ -8,6 +8,7 @@
 #include <Wire.h>
 #include "FirmwareUpdate.h"
 #include "OtaUpdater.h"
+#include "HomeControl.h"
 
 void setup() {
     Serial.begin(115200);
@@ -17,6 +18,7 @@ void setup() {
     Wire.setClock(400000);
 
     menuInit();
+    homeInit();
     initKeyboardMatrix();
     initDisplay();
     initRotaryEncoder();
@@ -38,6 +40,7 @@ void loop() {
     handleButtonPress();
     handleRotaryEncoder();
     otaLoop();
+    homeLoop();
 
     // Update displays
     if (!otaScreenActive()) oledDrawStatusLine();

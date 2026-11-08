@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include "DisplayManager.h"
 #include "MenuManager.h"
+#include "HomeControl.h"
 
 // ---------- pins ----------
 #define CLK_PIN 18
@@ -83,8 +84,8 @@ void handleButtonPress() {
   } else if (!reading && btnDown) {
     btnDown = false;
     if (!longFired && !vlongFired) {
-      if (isMenuOpen()) {
-        pendingEvent = BTN_SHORT;              // menu: no double-press, react instantly
+      if (isMenuOpen() || homeModeActive()) {
+        pendingEvent = BTN_SHORT;              // menu/Home: no double-press, react instantly
       } else if (singleReleasedAt && now - singleReleasedAt <= DOUBLE_PRESS_MS) {
         singleReleasedAt = 0;
         pendingEvent = BTN_DOUBLE;
@@ -181,6 +182,9 @@ void handleRotaryEncoder() {
   } else if (isMenuOpen()) {
     if (ev == BTN_SHORT) menuEventShort();
     else if (ev == BTN_LONG) menuEventLong();
+  } else if (homeModeActive()) {
+    if (ev == BTN_SHORT) homePress();
+    else if (ev == BTN_LONG) homeExit();
   } else {
     switch (ev) {
       case BTN_LONG:
@@ -213,6 +217,8 @@ void handleRotaryEncoder() {
 
   if (isMenuOpen()) {
     for (int i = 0; i < steps; ++i) menuRotate(dir);
+  } else if (homeModeActive()) {
+    homeTurn((getSettings().volInvertDir ? -dir : dir) * steps);
   } else if (isConnected()) {
     KbdSettings &s = getSettings();
     const int accel = accelFactor(now - lastDetAt);

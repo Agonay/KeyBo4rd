@@ -4,6 +4,7 @@
 #include <PCF8575.h>
 #include "DisplayManager.h"
 #include "BluetoothHID.h"
+#include "HomeControl.h"
 
 // ---------- GPIO extender ----------
 PCF8575 gpioExpander(0x20);
@@ -34,12 +35,15 @@ const Key keyboardLayout[numRows][numColsPCF] = {
   {Key_Shift, Key_Z, Key_X, Key_C, Key_V, Key_B, Key_N,
    Key_M, Key_Comma_ES, Key_Period_ES, Key_Guion, Key_Shift, Key_ArrowUp},
 
-  // Row 5 — Bottom: Ctrl Win Alt Space AltGr <  ← ↓ → \ Backspace Delete
+  // Row 5 — Bottom: Ctrl Win Alt Space AltGr < Fn ← ↓ → \ Backspace Delete
   {Key_Ctrl, Key_Cmd, Key_Left_Alt, Key_Space, Key_Right_Alt,
-   Key_LessThan, Key_Acento,
+   Key_LessThan, Key_Fn,
    Key_ArrowLeft, Key_ArrowDown, Key_ArrowRight,
    Key_Backslash, Key_Backspace, Key_Delete},
 };
+
+// Fn key position (left of the left arrow).
+static const int FN_ROW = 5, FN_COL = 6;
 
 // All physical states are sampled before building one complete HID report.
 KeyState keyStates[numRows][numColsPCF];
@@ -109,6 +113,27 @@ static void logLinkStats(unsigned long now) {
   maxQ = 0; maxWait = 0; maxScanGap = 0;
 }
 
+// ---------- Fn layer ----------
+// Fn tap (no other key while held) = Home mode on/off; Fn+1..9 = Home device.
+// Any key pressed while Fn is held is "consumed": it stays out of HID reports
+// until released, even if Fn is let go first.
+static bool fnUsed = false;
+
+static void onKeyEdge(int row, int col, bool down) {
+  KeyState &st = keyStates[row][col];
+  if (row == FN_ROW && col == FN_COL) {
+    if (down) fnUsed = false;
+    else if (!fnUsed) homeToggleMode();
+    return;
+  }
+  if (!down) { st.fnConsumed = false; return; }
+  if (!keyStates[FN_ROW][FN_COL].isPressed) return;
+  st.fnConsumed = true;
+  fnUsed = true;
+  const uint8_t u = keyboardLayout[row][col].usage;
+  if (u >= Key_1.usage && u <= Key_9.usage) homeSelectSlot(u - Key_1.usage + 1);
+}
+
 void initKeyboardMatrix() {
   for (int col = 0; col < numColsPCF; ++col) {
     gpioExpander.pinMode(colPinsPCF[col], OUTPUT);
@@ -142,6 +167,7 @@ void scanKeyboardMatrix() {
       if (now - state.stateChangeTime >= 10 && raw != state.isPressed) {
         state.isPressed = raw;
         lastKeyActivityTime = now;
+        onKeyEdge(row, col, raw);
         if (raw && keyboardLayout[row][col].usage) ++keyPressCount; // stats for the home screen
       }
       anyDown |= raw || state.isPressed;
@@ -164,7 +190,7 @@ void scanKeyboardMatrix() {
   unsigned count = 0;
   for (int row = 0; row < numRows; ++row) {
     for (int col = 0; col < numColsPCF; ++col) {
-      if (!keyStates[row][col].isPressed) continue;
+      if (!keyStates[row][col].isPressed || keyStates[row][col].fnConsumed) continue;
       const Key &key = keyboardLayout[row][col];
       report.modifiers |= key.modifiers;
       if (!key.usage) continue;

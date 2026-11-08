@@ -22,6 +22,7 @@ Rows: 6 (ESP32 pins) × Cols: 13 (PCF8575 pins) = 78 physical positions
 ```
 
 Row 0 = function keys (F1-F12 + Escape). Row 1 = number row. Rows 2-5 = QWERTY area.
+The **Fn** key is row 5 col 6 (left of ←); it is handled on the keyboard and never sent to the host.
 
 ## Libraries
 
@@ -61,6 +62,7 @@ loop():
 | `RotaryEncoder.{h,cpp}` | ISR quadrature decoder, button event FSM, menu/volume routing |
 | `DisplayManager.{h,cpp}` | OLED status line, E-Ink idle screens + menu rendering |
 | `MenuManager.{h,cpp}` | Menu state machine, settings model, NVS persistence |
+| `HomeControl.{h,cpp}` | Fn layer → Home Assistant (REST over LAN HTTP, worker task, Wi-Fi on demand) |
 | `BatteryManager.{h,cpp}` | Battery status (simulated; real ADC later) |
 | `main.ino` | Wiring + event loop |
 
@@ -109,6 +111,7 @@ The OS is configured **Spanish (Spain) on ANSI physical**. Characters are produc
 ### Knob and menu controls
 
 ```
+Home mode:         turn = adjust device   press = toggle device   hold = leave Home mode
 Outside the menu:  turn = volume (spin fast = 2x/3x steps)
                    press = play/pause   double-press = mute
                    hold (0.8 s) = open menu   hold 2.5 s = releaseAll (stuck-key recovery)
@@ -128,6 +131,14 @@ Header shows the firmware version (FW vN / FW dev).
 - **Boot splash:** `initDisplay()` plays a ~0.9 s animation; `bootSplashStatus(text, pct)` updates it from `setup()` until BLE is up.
 
 - Encoder: full-cycle (4 transitions per click, rests at A=B=1). A click counts when the knob returns to rest, re-syncing every click. `-DENC_HALF_STEP` for half-cycle encoders; `-DENC_DEBUG` logs raw ticks.
+
+## Home Assistant (Fn layer)
+
+- **Keys:** Fn tap = Home mode on/off. Fn+1..9 = pick device N (enters Home mode). Any key pressed while Fn is held is kept out of HID reports until released (`KeyState::fnConsumed`). Home mode ends on Fn tap, knob hold, or 60 s without input.
+- **Knob in Home mode:** press = `homeassistant.toggle` (scene/script → `turn_on`, button → `press`, media_player → `media_play_pause`). Turn by domain: light → `light.turn_on` `brightness_step_pct` ±10/click, fan → `increase/decrease_speed` per click, media_player → `volume_up/down`, cover → open/close, input_number/counter → increment/decrement. Other domains have no dial action.
+- **Displays:** E-Ink shows the device list (one full refresh on entering Home mode or changing device; the knob button is still polled during the refresh, rotation is not). OLED shows device name + live state (`GET /api/states/<entity>` after each action).
+- **Config** (setup portal: hold the knob at power-on, `http://192.168.4.1`): NVS `kbd`/`haUrl` (must be `http://`; TLS doesn't fit in RAM next to Bluedroid), `haToken` (long-lived access token), `haSlots` (one device per line, line N = Fn+N: `Name = entity` or `Name = press_entity, turn_entity`).
+- **Runtime:** HTTP runs in the `home` FreeRTOS task (6 KB stack, core 0) so the matrix scan never blocks. Knob clicks are coalesced while a request is in flight. Wi-Fi (STA + modem sleep for BLE coexistence) starts on first use and stops after 5 min without Home actions. Serial: `[HOME] ...` incl. heap at Wi-Fi start/up/off.
 
 ## Firmware updates (OTA from GitHub)
 

@@ -8,6 +8,7 @@
 #include "HardwareConfig.h"
 #include "OtaUpdater.h"
 #include "RotaryEncoder.h"
+#include "HomeControl.h"
 
 #define ENABLE_GxEPD2_GFX 0
 
@@ -77,6 +78,7 @@ static void einkSleep() {
 
 static void serviceKeyboardDuringRefresh(const void*) {
   scanKeyboardMatrix();
+  handleButtonPress();   // the button (GPIO13) isn't shared, so presses still count
   delay(1);
 }
 
@@ -342,6 +344,31 @@ static void drawFooter(bool caps, uint32_t keys, unsigned long upMin) {
   printRight(128, 55, buf);
 }
 
+// ---------- Home mode screen ----------
+//  0..9    inverted bar: "HOME" + device number
+//  13..44  device name (size 2 if it fits) + live state from Home Assistant
+//  52..63  knob hints
+static void drawHomeScreen() {
+  char buf[24];
+  oled.clearDisplay();
+  oled.fillRect(0, 0, 128, 10, SSD1306_WHITE);
+  printAt(2, 1, "HOME", 1, SSD1306_BLACK);
+  const int n = homeSlotCount();
+  if (n) snprintf(buf, sizeof(buf), "%d/%d", homeActiveSlot() + 1, n);
+  else snprintf(buf, sizeof(buf), "no devices");
+  printAt(126 - textWidth(buf, 1), 1, buf, 1, SSD1306_BLACK);
+
+  const char *name = n ? homeSlotName(homeActiveSlot()) : "Not set up";
+  if (textWidth(name, 2) <= 128) printCentered(15, name, 2);
+  else printCentered(19, name, 1);
+  homeStatusText(buf, sizeof(buf));
+  printCentered(36, buf[0] ? buf : "...", 1);
+
+  oled.drawFastHLine(0, 52, 128, SSD1306_WHITE);
+  printAt(0, 55, "Push:on/off Turn:adj");
+  oled.display();
+}
+
 // Redraws only when something visible changed. Keys/WPM refresh once a second so
 // typing never stalls the scan loop on I2C (~23 ms per full frame).
 void oledDrawStatusLine() {
@@ -353,6 +380,18 @@ void oledDrawStatusLine() {
   static bool toastShown = false;
 
   if (isMenuOpen()) { menuWasOpen = true; return; }
+  if (homeModeActive()) {
+    static uint32_t drawnStatus = 0, drawnPanel = 0;
+    static int drawnSlot = -1;
+    if (menuWasOpen || drawnStatus != homeStatusVersion() || drawnSlot != homeActiveSlot() ||
+        drawnPanel != homePanelVersion()) {
+      drawnStatus = homeStatusVersion(); drawnSlot = homeActiveSlot(); drawnPanel = homePanelVersion();
+      drawHomeScreen();
+    }
+    menuWasOpen = false;
+    forceFull = true;    // full home-screen redraw once Home mode ends
+    return;
+  }
   if (menuWasOpen) { menuWasOpen = false; forceFull = true; }
 
   const unsigned long now = millis();
@@ -499,9 +538,78 @@ static void drawRainIdleScreen() {
   } while (einkDisplay.nextPage());
 }
 
+// ---------- E-Ink Home panel ----------
+// Device list for the Fn layer. One full refresh (~2 s) on entering Home mode
+// or switching device; live state goes to the OLED, which is fast.
+static void drawEinkHomePanel() {
+  einkWake();
+  einkDisplay.setRotation(0);
+  einkDisplay.setFullWindow();
+  const int n = homeSlotCount();
+  const int active = homeActiveSlot();
+  const uint8_t size = n <= 6 ? 2 : 1;
+  const int rowH = size == 2 ? 22 : 16;
+  einkDisplay.firstPage();
+  do {
+    einkDisplay.fillScreen(GxEPD_WHITE);
+    einkDisplay.fillRect(0, 0, 200, 26, GxEPD_BLACK);
+    einkDisplay.setTextColor(GxEPD_WHITE);
+    einkDisplay.setTextSize(2);
+    einkDisplay.setCursor(8, 6);
+    einkDisplay.print(F("HOME"));
+
+    einkDisplay.setTextSize(size);
+    if (!n) {
+      einkDisplay.setTextColor(GxEPD_BLACK);
+      einkDisplay.setTextSize(1);
+      einkDisplay.setCursor(8, 40);  einkDisplay.print(F("No devices set up."));
+      einkDisplay.setCursor(8, 56);  einkDisplay.print(F("Hold the knob at power-on"));
+      einkDisplay.setCursor(8, 68);  einkDisplay.print(F("and open 192.168.4.1"));
+    }
+    for (int i = 0; i < n; ++i) {
+      const int y = 32 + i * rowH;
+      char line[20];
+      snprintf(line, sizeof(line), "%d %s", i + 1, homeSlotName(i));
+      if (i == active) {
+        einkDisplay.fillRect(0, y - 2, 200, rowH - 2, GxEPD_BLACK);
+        einkDisplay.setTextColor(GxEPD_WHITE);
+      } else {
+        einkDisplay.setTextColor(GxEPD_BLACK);
+      }
+      einkDisplay.setCursor(6, y + (rowH - 2 - 8 * size) / 2 - 1);
+      einkDisplay.print(line);
+    }
+
+    einkDisplay.setTextColor(GxEPD_BLACK);
+    einkDisplay.setTextSize(1);
+    einkDisplay.drawFastHLine(0, 174, 200, GxEPD_BLACK);
+    einkDisplay.setCursor(4, 179);  einkDisplay.print(F("Knob: push=on/off turn=adj"));
+    einkDisplay.setCursor(4, 190);  einkDisplay.print(F("Fn+1-9 pick  Fn/hold: exit"));
+  } while (einkDisplay.nextPage());
+  einkSleep();
+}
+
 void renderIdleScreen() {
   if (isMenuOpen()) return;
   if (!einkInitialized) return;
+
+  // Home mode owns the panel; leaving it forces the idle screen to come back.
+  static uint32_t drawnHomePanel = 0;
+  static uint32_t seenHomePanel = 0;
+  static unsigned long homePanelChangedAt = 0;
+  if (homePanelVersion() != seenHomePanel) { seenHomePanel = homePanelVersion(); homePanelChangedAt = millis(); }
+  if (homeModeActive()) {
+    // wait a moment so a quick Fn+1, Fn+2 costs one refresh, not two
+    if (drawnHomePanel != seenHomePanel && millis() - homePanelChangedAt > 250) {
+      drawnHomePanel = seenHomePanel;
+      Serial.println(F("[EINK] home panel"));
+      drawEinkHomePanel();
+      currentIdleMode = (MenuIdleMode)255;
+      lastDrawnSecond = 0;
+    }
+    return;
+  }
+  drawnHomePanel = 0;
 
   MenuIdleMode mode = getSettings().einkIdleMode;
 #if EINK_SHARES_ENCODER_PIN
