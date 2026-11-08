@@ -26,7 +26,8 @@ The **Fn** key is row 5 col 6 (left of ←); it is handled on the keyboard and n
 
 ## Libraries
 
-- **ESP32-BLE-Keyboard** — HID keyboard + media keys over BLE
+- **ESP32-BLE-Keyboard** (0.3.2) — HID keyboard + media keys over BLE, built with `-D USE_NIMBLE`
+- **NimBLE-Arduino** (`~1.4.3`) — BLE host. Replaces Bluedroid, which linked Classic BT + BLE Mesh from the prebuilt SDK (~550 KB more flash). The keyboard library only supports the 1.x API, so don't move to 2.x. Its NimBLE mode spin-waits after each report unless `setDelay(0)` is called (done in `initBluetooth()`).
 - **PCF8575** — I2C GPIO expander
 - **GxEPD2** — E-Ink (GxEPD2_154_D67)
 - **Adafruit SSD1306 + GFX** — OLED
@@ -94,7 +95,7 @@ The OS is configured **Spanish (Spain) on ANSI physical**. Characters are produc
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Key spams endlessly on Windows | BLE disconnected while key held → latched report; no release on reconnect. | Guard with `isConnected()`, call `releaseAll()` on reconnect edge, forced release after 2 s. |
-| Lag builds up while typing, key sticks ~2 s then repeats, BLE drops | Bluedroid notifications don't block; reports sent faster than the link piled up inside the stack. | Reports go through a 16-entry queue in `KeyboardMatrix.cpp`, sent only when `bleCanSend()` (`esp_ble_get_cur_sendable_packets_num`). Serial logs `[BLE] heap/sendable/q` every 10 s. |
+| Lag builds up while typing, key sticks ~2 s then repeats, BLE drops | BLE notifications don't block; reports sent faster than the link piled up inside the stack. | Reports go through a 16-entry queue in `KeyboardMatrix.cpp`, sent only when `bleCanSend()` (NimBLE host's free controller ACL buffers, `ble_hs_hci_avail_pkts`). Serial logs `[BLE] heap/sendable/q` every 10 s. |
 | Knob misses volume steps at fast rotation | ISR level-triggered (`LOW`), 1 ms debounce drops transitions, BLE called inside ISR. | ISR fires `CHANGE` on both pins, tiny filter, BLE in loop only. |
 | Spanish chars wrong | `BleKeyboard.press(char)` uses US ASCII map; Spanish-only chars (`ñ ¿ ¡ º`) not in map. | Use Spanish(ES)-on-ANSI layout table with physical HID codes. |
 | E-Ink ghosting / stutter | Full refresh every frame. | Use partial updates + dirty-cooldown. |
@@ -137,7 +138,7 @@ Header shows the firmware version (FW vN / FW dev).
 - **Keys:** Fn tap = Home mode on/off. Fn+1..9 = pick device N (enters Home mode). Any key pressed while Fn is held is kept out of HID reports until released (`KeyState::fnConsumed`). Home mode ends on Fn tap, knob hold, or 60 s without input.
 - **Knob in Home mode:** press = `homeassistant.toggle` (scene/script → `turn_on`, button → `press`, media_player → `media_play_pause`). Turn by domain: light → `light.turn_on` `brightness_step_pct` ±10/click, fan → `increase/decrease_speed` per click, media_player → `volume_up/down`, cover → open/close, input_number/counter → increment/decrement. Other domains have no dial action.
 - **Displays:** E-Ink shows the device list (one full refresh on entering Home mode or changing device; the knob button is still polled during the refresh, rotation is not). OLED shows device name + live state (`GET /api/states/<entity>` after each action).
-- **Config** (setup portal: hold the knob at power-on, `http://192.168.4.1`): NVS `kbd`/`haUrl` (must be `http://`; TLS doesn't fit in RAM next to Bluedroid), `haToken` (long-lived access token), `haSlots` (one device per line, line N = Fn+N: `Name = entity` or `Name = press_entity, turn_entity`).
+- **Config** (setup portal: hold the knob at power-on, `http://192.168.4.1`): NVS `kbd`/`haUrl` (must be `http://`; TLS didn't fit in RAM next to Bluedroid; not re-measured with NimBLE), `haToken` (long-lived access token), `haSlots` (one device per line, line N = Fn+N: `Name = entity` or `Name = press_entity, turn_entity`).
 - **Runtime:** HTTP runs in the `home` FreeRTOS task (6 KB stack, core 0) so the matrix scan never blocks. Knob clicks are coalesced while a request is in flight. Wi-Fi (STA + modem sleep for BLE coexistence) starts on first use and stops after 5 min without Home actions. Serial: `[HOME] ...` incl. heap at Wi-Fi start/up/off.
 
 ## Firmware updates (OTA from GitHub)
@@ -155,4 +156,4 @@ Header shows the firmware version (FW vN / FW dev).
 - **TLS roots:** `GithubRootCAs.h` pins the Sectigo/USERTrust (github.com), ISRG/Let's Encrypt (release-assets host) and DigiCert roots. If GitHub changes CA, update this file.
 - **E-Ink / knob pin sharing:** the E-Ink SCK and the encoder CLK are both wired to GPIO18. `einkWake()` suspends the encoder interrupts and attaches SPI; `einkSleep()` hibernates the panel, calls `SPI.end()` and resumes the encoder. The knob doesn't respond during a refresh (~2-3 s), so idle redraws wait 3 s after the last key/knob input, and Clock mode is disabled. Moving the E-Ink SCK wire to a free GPIO and setting `EINK_SCK` (`HardwareConfig.h`) removes the sharing.
 - **E-Ink "Animation" idle mode (`EinkAnimation.{h,cpp}`, `EinkScene.h`):** a rainy street drawn from a picture by `tools/make_eink_scene.py <png>`. The script makes a 200x200 Atkinson-dithered base plus a 64x64 blue-noise table. Every frame is a partial refresh. Light effects (lamp flicker, lantern halo, drifting fog) only turn black base pixels white, in blue-noise order, so small changes stay local and don't crawl. On top of that it draws rain streaks, puddle ripples and the cat sprite in the window. It starts 5 s after the last key/knob input. Input pauses it with `powerOff()`, which keeps the controller RAM, so resuming is another partial refresh. After a deep sleep (menu, mode change) the last frame is written back with `writeImageToPrevious()` before continuing (`einkWakeKeep()` skips the forced first full refresh). Full refreshes happen only when the scene first appears (boot draws it directly when this mode is selected) and once after 30 min away. SPI is released after each frame, so the knob works in the 150 ms gaps.
-- **No automatic rollback:** a release that crashes at boot needs a USB reflash. Flash usage is ~92% of the 1.9 MB OTA slot.
+- **No automatic rollback:** a release that crashes at boot needs a USB reflash. Flash usage is ~67% of the 1.9 MB OTA slot (was ~95% before NimBLE).

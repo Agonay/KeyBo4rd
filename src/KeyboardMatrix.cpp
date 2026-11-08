@@ -58,7 +58,7 @@ static bool wasConnected = false;
 static bool waitForRelease = false;
 
 // ---------- paced report queue ----------
-// Bluedroid notifications don't block: anything sent faster than the link can
+// BLE notifications don't block: anything sent faster than the link can
 // carry piles up inside the stack (lag, releases arriving seconds late so the
 // host auto-repeats, then a disconnect). Reports wait here instead and leave
 // only when the stack has a free TX buffer. Every report is a full snapshot,
