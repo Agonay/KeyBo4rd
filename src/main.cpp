@@ -20,8 +20,13 @@ void setup() {
     initKeyboardMatrix();
     initDisplay();
     initRotaryEncoder();
+    bootSplashStatus("Checking updates", 45);
     otaBootCheck();      // before BLE: Wi-Fi + TLS get the radio and RAM to themselves
+    bootSplashStatus("Starting Bluetooth", 85);
     initBluetooth();
+    bootSplashStatus("Ready", 100);
+    delay(250);
+    oledForceRedraw();   // hand the OLED to the home screen
 }
 
 void loop() {

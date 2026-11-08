@@ -1,14 +1,12 @@
 #include "DisplayManager.h"
-#include "BatteryIcons.h"
 #include "BatteryManager.h"
 #include "BluetoothHID.h"
 #include "MenuManager.h"
 #include "KeyboardMatrix.h"
 #include <GxEPD2_BW.h>
 #include "totoro_200x200_1b.h"
-#include "ship16.h"
-#include "fire16.h"
 #include "HardwareConfig.h"
+#include "OtaUpdater.h"
 
 #define ENABLE_GxEPD2_GFX 0
 
@@ -28,12 +26,8 @@ GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> einkDisplay(GxEPD2_154_D67(CS_
 static MenuIdleMode currentIdleMode = (MenuIdleMode)255; // sentinel: force first render
 static bool einkInitialized = false;
 static bool einkIsAwake = false;
-static bool oledNeedsRedraw = true;
 static bool menuWasOpen = false;
 static uint8_t lastOledBrt = 100;
-static bool lastCapsOn = false;
-static int lastBatPct = -1;
-static bool lastBleConn = false;
 
 static unsigned long lastIdleRenderMs = 0;
 static const unsigned long idleCooldownMs = 300000; // 5 min between full redraws (e-ink is slow)
@@ -61,21 +55,107 @@ static void serviceKeyboardDuringRefresh(const void*) {
   delay(1);
 }
 
+// ---------- OLED drawing primitives ----------
+static const char *DEVICE_NAME = "K3YBo4rd";
+
+static int textWidth(const char *s, uint8_t size) { return (int)strlen(s) * 6 * size; }
+
+static void printAt(int x, int y, const char *s, uint8_t size = 1, uint16_t color = SSD1306_WHITE) {
+  oled.setTextSize(size);
+  oled.setTextColor(color);
+  oled.setCursor(x, y);
+  oled.print(s);
+}
+
+static void printCentered(int y, const char *s, uint8_t size = 1, uint16_t color = SSD1306_WHITE) {
+  int w = textWidth(s, size);
+  printAt(w >= 128 ? 0 : (128 - w) / 2, y, s, size, color);
+}
+
+static void printRight(int xRight, int y, const char *s, uint8_t size = 1) {
+  printAt(xRight - textWidth(s, size), y, s, size);
+}
+
+// Bluetooth rune, scalable: h = total height, top-left of its bounding box at (cx - h/4, y0).
+static void drawBtRune(int cx, int y0, int h) {
+  const int w = max(2, h / 4);
+  const int y1 = y0 + h - 1;
+  const int q1 = y0 + h / 4, q3 = y0 + (3 * h) / 4;
+  oled.drawLine(cx, y0, cx, y1, SSD1306_WHITE);
+  oled.drawLine(cx, y0, cx + w, q1, SSD1306_WHITE);
+  oled.drawLine(cx + w, q1, cx - w, q3, SSD1306_WHITE);
+  oled.drawLine(cx, y1, cx + w, q3, SSD1306_WHITE);
+  oled.drawLine(cx + w, q3, cx - w, q1, SSD1306_WHITE);
+}
+
+// 15x8 battery: body 13x8, tip 2x4.
+static void drawBatteryIcon(int x, int y, int pct) {
+  oled.drawRect(x, y, 13, 8, SSD1306_WHITE);
+  oled.fillRect(x + 13, y + 2, 2, 4, SSD1306_WHITE);
+  int fill = (constrain(pct, 0, 100) * 9 + 50) / 100;
+  if (pct > 0 && fill == 0) fill = 1;
+  oled.fillRect(x + 2, y + 2, fill, 4, SSD1306_WHITE);
+}
+
+// ---------- boot splash ----------
+static void drawSplashFrame(int nameChars, bool cursorOn, int wavePos, int pct, const char *status) {
+  oled.clearDisplay();
+
+  // Row of 12 keycaps; the ones near wavePos are "pressed" (filled, 1 px lower).
+  for (int i = 0; i < 12; ++i) {
+    const int x = 5 + i * 10;
+    const bool down = wavePos >= 0 && abs(i - wavePos) <= 1;
+    if (down) oled.fillRoundRect(x, 3, 8, 7, 1, SSD1306_WHITE);
+    else      oled.drawRoundRect(x, 2, 8, 7, 1, SSD1306_WHITE);
+  }
+
+  // Name, typed out.
+  char name[12];
+  snprintf(name, sizeof(name), "%.*s", nameChars, DEVICE_NAME);
+  const int nameX = (128 - textWidth(DEVICE_NAME, 2)) / 2;
+  printAt(nameX, 17, name, 2);
+  if (cursorOn) oled.fillRect(nameX + nameChars * 12, 17, 2, 14, SSD1306_WHITE);
+
+  if (pct >= 0) {
+    oled.drawRoundRect(14, 37, 100, 6, 2, SSD1306_WHITE);
+    oled.fillRect(16, 39, (96 * constrain(pct, 0, 100)) / 100, 2, SSD1306_WHITE);
+  }
+  if (status) printCentered(46, status);
+
+  char fw[12];
+  if (FW_VERSION == 0) snprintf(fw, sizeof(fw), "dev build");
+  else snprintf(fw, sizeof(fw), "v%d", FW_VERSION);
+  printCentered(57, fw);
+  oled.display();
+}
+
+static void playBootAnimation() {
+  const int n = strlen(DEVICE_NAME);
+  for (int i = 0; i <= n; ++i) {
+    drawSplashFrame(i, true, i * 12 / n, -1, nullptr);
+    delay(65);
+  }
+  for (int i = 0; i < 4; ++i) {          // blink the cursor while the bar fills
+    drawSplashFrame(n, i % 2 == 0, -1, (i + 1) * 5, nullptr);
+    delay(90);
+  }
+}
+
+void bootSplashStatus(const char *status, int pct) {
+  drawSplashFrame(strlen(DEVICE_NAME), false, -1, pct, status);
+}
+
 void initDisplay() {
-  delay(1000);
+  delay(100);   // let the OLED supply settle
 
   oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   oled.ssd1306_command(0xD9); oled.ssd1306_command(0xF1);
   oled.ssd1306_command(SSD1306_SETDISPLAYCLOCKDIV);
   oled.ssd1306_command(0xF0);
-  oled.clearDisplay();
-  oled.setTextSize(1);
-  oled.setTextColor(WHITE);
-  drawChargeTopLeft(42, 3);
-  oled.drawFastHLine(0, 19, oled.width(), SSD1306_WHITE);
-  oled.display();
-
+  oled.cp437(true);
   applyOledBrightness(getSettings().oledBrightness);
+  playBootAnimation();
+  bootSplashStatus("Starting...", 20);
 #if ENABLE_EINK
   SPI.begin(EINK_SCK, -1, EINK_MOSI, CS_PIN);
   einkDisplay.epd2.setBusyCallback(serviceKeyboardDuringRefresh);
@@ -100,152 +180,188 @@ void initDisplay() {
 #endif
 }
 
-// ---------- OLED helpers ----------
 void applyOledBrightness(uint8_t percent) {
   uint8_t val = map(percent, 0, 100, 0, 255);
   oled.ssd1306_command(0x81); // set contrast
   oled.ssd1306_command(val);
 }
 
-static void oledClearLine() {
-  oled.fillRect(0, 0, 128, 20, SSD1306_BLACK);
+// ---------- home screen: typing stats ----------
+// One bucket per second of key presses; WPM = presses in the window / 5 chars per word.
+static const int WPM_WINDOW_S = 15;
+static uint8_t pressBuckets[WPM_WINDOW_S];
+static int bucketIdx = 0;
+static uint32_t lastPressCount = 0;
+static unsigned long lastStatTick = 0;
+static int wpm = 0;
+
+static const int SPARK_N = 64;           // 1 px per sample, one sample every 2 s (~2 min)
+static uint8_t spark[SPARK_N];
+static int sparkHead = 0;
+static uint8_t sparkSubTick = 0;
+
+// Returns true once per second, when the stats change.
+static bool updateTypingStats(unsigned long now) {
+  if (now - lastStatTick < 1000) return false;
+  lastStatTick = now;
+  const uint32_t count = getKeyPressCount();
+  pressBuckets[bucketIdx] = (uint8_t)min<uint32_t>(255, count - lastPressCount);
+  bucketIdx = (bucketIdx + 1) % WPM_WINDOW_S;
+  lastPressCount = count;
+  int sum = 0;
+  for (int i = 0; i < WPM_WINDOW_S; ++i) sum += pressBuckets[i];
+  wpm = min(999, sum * 60 / WPM_WINDOW_S / 5);
+  if (++sparkSubTick >= 2) {
+    sparkSubTick = 0;
+    spark[sparkHead] = (uint8_t)min(255, wpm);
+    sparkHead = (sparkHead + 1) % SPARK_N;
+  }
+  return true;
 }
 
-void oledDrawStatusLine() {
-  bool nowOpen = isMenuOpen();
-  if (nowOpen) { menuWasOpen = true; return; }
-  if (menuWasOpen) {
-    oled.clearDisplay(); // clear entire screen, not just top 20px
-    oledNeedsRedraw = true;
-    lastBatPct = -1; lastCapsOn = !lastCapsOn; lastBleConn = !lastBleConn;
-    menuWasOpen = false;
-  }
+// ---------- home screen: toasts (knob feedback) ----------
+static char toastText[16];
+static unsigned long toastUntil = 0;
+static int toastVolume = 0;              // net volume steps while a volume toast is showing
+static bool toastDirty = false;
+static const unsigned long TOAST_MS = 1100;
 
-  KbdSettings &s = getSettings();
+void homeToast(const char *text) {
+  snprintf(toastText, sizeof(toastText), "%s", text);
+  toastVolume = 0;
+  toastUntil = millis() + TOAST_MS;
+  toastDirty = true;
+}
 
+void homeToastVolume(int steps) {
+  if (millis() >= toastUntil) toastVolume = 0;
+  toastVolume = constrain(toastVolume + steps, -99, 99);
+  if (toastVolume == 0) snprintf(toastText, sizeof(toastText), "VOL 0");
+  else snprintf(toastText, sizeof(toastText), "VOL %c%d", toastVolume > 0 ? '+' : '-', abs(toastVolume));
+  toastUntil = millis() + TOAST_MS;
+  toastDirty = true;
+}
 
-  bool changed = false;
-  bool capsOn = isCapsFromHost();
-  bool bleConn = bleKeyboard.isConnected();
-  int batPct   = getBatteryPercentage();
-
-  if (capsOn != lastCapsOn) { lastCapsOn = capsOn; changed = true; }
-  if (bleConn != lastBleConn) { lastBleConn = bleConn; changed = true; }
-  if (batPct != lastBatPct && s.showBattery) { lastBatPct = batPct; changed = true; }
-
-  if (!changed && !oledNeedsRedraw) return;
-  oledNeedsRedraw = false;
-
-  oledClearLine();
-
-  // Caps lock icon
-  if (capsOn) {
-    oled.drawBitmap(112, 1, ship16_bitmap, SHIP16_WIDTH, SHIP16_HEIGHT, SSD1306_WHITE);
-  }
-
-  // Battery
-  if (s.showBattery) {
+// ---------- home screen: layout ----------
+//  0..8    status bar: BT state (left), battery (right)
+//  11..50  body: WPM + history graph when connected, pairing animation otherwise
+//  53..63  footer: CAPS badge, key count, uptime
+static void drawStatusBar(bool conn, int batPct, bool showBat, bool lowBlinkOff) {
+  drawBtRune(3, 0, 8);
+  printAt(10, 0, conn ? "Connected" : "Pairing");
+  if (showBat) {
     char buf[6];
     snprintf(buf, sizeof(buf), "%d%%", batPct);
-    oled.setCursor(1, 1);
-    oled.print(buf);
+    printRight(110, 0, buf);
+    if (!lowBlinkOff) drawBatteryIcon(113, 0, batPct);
   }
+  oled.drawFastHLine(0, 10, 128, SSD1306_WHITE);
+}
 
-  // BLE dot
-  if (bleConn) {
-    oled.fillCircle(1, 10, 2, SSD1306_WHITE);
+static void drawTypingBody() {
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d", wpm);
+  const int numW = textWidth(buf, 3);
+  printAt(max(0, (54 - numW) / 2), 15, buf, 3);
+  printAt((54 - textWidth("WPM", 1)) / 2, 42, "WPM");
+
+  // History graph, newest sample on the right.
+  const int gx = 62, gTop = 14, gBot = 49, gh = gBot - gTop;
+  int peak = 40;
+  for (int i = 0; i < SPARK_N; ++i) peak = max(peak, (int)spark[i]);
+  for (int x = gx; x < gx + 66; x += 4) oled.drawPixel(x, gTop, SSD1306_WHITE);  // dotted ceiling
+  oled.drawFastHLine(gx, gBot, 66, SSD1306_WHITE);
+  for (int i = 0; i < SPARK_N; ++i) {
+    const int v = spark[(sparkHead + i) % SPARK_N];
+    if (!v) continue;
+    const int h = max(1, v * gh / peak);
+    oled.drawFastVLine(gx + 1 + i, gBot - h, h, SSD1306_WHITE);
   }
+  snprintf(buf, sizeof(buf), "%d", peak);
+  oled.fillRect(127 - textWidth(buf, 1), gTop, textWidth(buf, 1) + 1, 8, SSD1306_BLACK);
+  printRight(128, gTop, buf);   // graph scale
+}
 
-  oled.drawFastHLine(0, 19, 128, SSD1306_WHITE);
+static void drawPairingBody(uint8_t frame) {
+  // Rune with radio waves pulsing outwards.
+  drawBtRune(18, 17, 28);
+  for (int i = 0; i < 3; ++i) {
+    if (i < (frame % 4)) oled.drawCircleHelper(22, 31, 9 + i * 5, 0x2 | 0x4, SSD1306_WHITE);
+  }
+  char dots[8];
+  snprintf(dots, sizeof(dots), "PAIRING%.*s", frame % 4, "...");
+  printAt(48, 17, dots);
+  printAt(48, 30, "Find me as");
+  printAt(48, 40, DEVICE_NAME);
+}
+
+static void drawToast() {
+  oled.fillRoundRect(6, 16, 116, 30, 4, SSD1306_WHITE);
+  const uint8_t size = textWidth(toastText, 2) <= 108 ? 2 : 1;
+  printCentered(size == 2 ? 24 : 27, toastText, size, SSD1306_BLACK);
+}
+
+static void drawFooter(bool caps, uint32_t keys, unsigned long upMin) {
+  oled.drawFastHLine(0, 52, 128, SSD1306_WHITE);
+  if (caps) {
+    oled.fillRoundRect(0, 54, 29, 10, 2, SSD1306_WHITE);
+    printAt(3, 55, "CAPS", 1, SSD1306_BLACK);
+  } else {
+    oled.drawRoundRect(0, 54, 29, 10, 2, SSD1306_WHITE);
+    printAt(3, 55, "caps");
+  }
+  char buf[16];
+  if (keys < 100000) snprintf(buf, sizeof(buf), "%lu keys", (unsigned long)keys);
+  else snprintf(buf, sizeof(buf), "%luk keys", (unsigned long)(keys / 1000));
+  printAt(34, 55, buf);
+  snprintf(buf, sizeof(buf), "%lu:%02lu", upMin / 60, upMin % 60);
+  printRight(128, 55, buf);
+}
+
+// Redraws only when something visible changed. Keys/WPM refresh once a second so
+// typing never stalls the scan loop on I2C (~23 ms per full frame).
+void oledDrawStatusLine() {
+  static bool forceFull = true;
+  static bool lastConn = false, lastCaps = false, lastLowOff = false, lastShowBat = true;
+  static int lastBat = -1;
+  static unsigned long lastUpMin = (unsigned long)-1;
+  static uint8_t lastFrame = 255;
+  static bool toastShown = false;
+
+  if (isMenuOpen()) { menuWasOpen = true; return; }
+  if (menuWasOpen) { menuWasOpen = false; forceFull = true; }
+
+  const unsigned long now = millis();
+  KbdSettings &s = getSettings();
+  const bool conn    = bleKeyboard.isConnected();
+  const bool caps    = isCapsFromHost();
+  const int  bat     = getBatteryPercentage();
+  const bool showBat = s.showBattery;
+  const bool lowOff  = showBat && bat <= s.lowBatteryPct && (now / 500) % 2;
+  const unsigned long upMin = now / 60000;
+  const uint8_t frame = conn ? 0 : (uint8_t)((now / 350) % 4);
+  const bool toastOn = now < toastUntil;
+
+  bool changed = updateTypingStats(now) && conn;
+  changed |= forceFull || toastDirty || toastOn != toastShown;
+  changed |= conn != lastConn || caps != lastCaps || bat != lastBat || showBat != lastShowBat;
+  changed |= lowOff != lastLowOff || upMin != lastUpMin || frame != lastFrame;
+  if (!changed) return;
+
+  forceFull = false; toastDirty = false; toastShown = toastOn;
+  lastConn = conn; lastCaps = caps; lastBat = bat; lastShowBat = showBat;
+  lastLowOff = lowOff; lastUpMin = upMin; lastFrame = frame;
+
+  oled.clearDisplay();
+  drawStatusBar(conn, bat, showBat, lowOff);
+  if (conn) drawTypingBody(); else drawPairingBody(frame);
+  drawFooter(caps, getKeyPressCount(), upMin);
+  if (toastOn) drawToast();
   oled.display();
 }
 
-// Full-screen overlays (e.g. the update screen) call this to restore the status UI.
+// Full-screen overlays (e.g. the update screen) call this to restore the home screen.
 void oledForceRedraw() { menuWasOpen = true; }
-
-void batteryStatus(int charge) {
-  char buf[5];
-  snprintf(buf, sizeof(buf), "%d%%", charge);
-  int textSize = 1;
-  oled.setTextSize(textSize);
-  const int maxW = 6 * 3 * textSize, maxH = 8 * textSize;
-  const int m = 1;
-  const int clearX = oled.width() - m;
-  oled.fillRect(clearX, 0, maxW + 2, maxH + 2, SSD1306_BLACK);
-  int16_t x1, y1; uint16_t w, h;
-  oled.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
-  int x = 1;
-  int y = 0 - y1;
-  oled.setCursor(x, y);
-  oled.print(buf);
-  oled.display();
-}
-
-void capsLockStatus(bool on) {
-  static bool prev = !on;
-  if (on == prev) return;
-  prev = on;
-  const int w = SHIP16_WIDTH, h = SHIP16_HEIGHT;
-  const int m = 1;
-  const int x = oled.width() - w - m;
-  const int y = m;
-  oled.fillRect(x - 1, y - 1, w + 2, h + 2, SSD1306_BLACK);
-  if (!on) {
-    oled.drawBitmap(x, y, ship16_bitmap, w, h, SSD1306_WHITE);
-  }
-  oled.display();
-}
-
-void drawChargeTopLeft(uint8_t percent, uint8_t segments) {
-  if (percent > 100) percent = 100;
-  char buf[6];
-  snprintf(buf, sizeof(buf), "%d%%", percent);
-  oled.setTextSize(1);
-  oled.setTextColor(SSD1306_WHITE);
-  int16_t x1, y1; uint16_t w, h;
-  oled.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
-  int areaW = max<int>(w, 24);
-  int areaH = h + 1 + 8;
-  oled.fillRect(0, 0, areaW + 1, areaH, SSD1306_BLACK);
-  int tx = 1;
-  int ty = 0 - y1;
-  oled.setCursor(tx, ty);
-  oled.print(buf);
-  int bx = 0;
-  int by = ty + h + 1;
-  drawBattery24x8(bx, by, segments);
-}
-
-void drawBattery24x8(int x, int y, uint8_t level) {
-  if (level > 5) level = 5;
-  const int H = 8;
-  const int TIP_W = 3;
-  const int BODY_W = 24 - TIP_W;
-  const int BORDER = 1;
-  oled.drawRect(x, y, BODY_W, H, SSD1306_WHITE);
-  int tipY = y + (H - 4) / 2;
-  oled.fillRect(x + BODY_W, tipY, TIP_W, 4, SSD1306_WHITE);
-  const int innerX = x + BORDER;
-  const int innerY = y + BORDER;
-  const int innerW = BODY_W - 2 * BORDER;
-  const int innerH = H - 2 * BORDER;
-  const int SEG = 5;
-  const int GAP = 1;
-  const int segW = (innerW - (SEG - 1) * GAP) / SEG;
-  for (int i = 0; i < level; ++i) {
-    int sx = innerX + i * (segW + GAP);
-    oled.fillRect(sx, innerY, segW, innerH, SSD1306_WHITE);
-  }
-}
-
-void demoFourStatesRow(int y) {
-  oled.fillRect(0, y, oled.width(), 10, SSD1306_BLACK);
-  int x0 = 4;
-  drawBattery24x8(x0 +  0, y, 0);
-  drawBattery24x8(x0 + 30, y, 1);
-  drawBattery24x8(x0 + 60, y, 3);
-  drawBattery24x8(x0 + 90, y, 5);
-}
 
 // ---------- E-Ink runtime clock ----------
 // Called from loop — only draws when 10-second block changes
@@ -421,17 +537,4 @@ void renderIdleScreen() {
     default:
       break;
   }
-}
-
-void menuDemo() {
-  oled.fillRect(0, 20, 128, 44, SSD1306_BLACK);
-  oled.fillRect(0, 21, 128, 8, SSD1306_WHITE);
-  oled.fillRect(0, 31, 128, 8, SSD1306_WHITE);
-  oled.fillRect(0, 41, 128, 8, SSD1306_WHITE);
-  oled.fillRect(0, 51, 128, 8, SSD1306_WHITE);
-  oled.setTextSize(1);
-  oled.setTextColor(SSD1306_BLACK);
-  char *text = (char *)"Prueba menu";
-  oled.setCursor(1, 21);
-  oled.print(text);
 }

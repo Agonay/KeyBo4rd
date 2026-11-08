@@ -175,6 +175,7 @@ void handleRotaryEncoder() {
     if (isConnected()) {
       bleKeyboard.releaseAll();
       Serial.println(F("[BTN] recovery: releaseAll"));
+      if (!isMenuOpen()) homeToast("KEYS FREED");
     }
   } else if (isMenuOpen()) {
     if (ev == BTN_SHORT) menuEventShort();
@@ -185,10 +186,10 @@ void handleRotaryEncoder() {
         menuOpen();
         break;
       case BTN_SHORT:
-        if (isConnected()) pendingPlay = true;
+        if (isConnected()) { pendingPlay = true; homeToast("PLAY/PAUSE"); }
         break;
       case BTN_DOUBLE:
-        if (isConnected()) pendingMute = true;
+        if (isConnected()) { pendingMute = true; homeToast("MUTE"); }
         break;
       default:
         break;
@@ -215,7 +216,9 @@ void handleRotaryEncoder() {
     KbdSettings &s = getSettings();
     const int accel = accelFactor(now - lastDetAt);
     if (s.volInvertDir) dir = -dir;
-    pendingVolume = constrain(pendingVolume + dir * s.volStepsPerDetent * steps * accel, -32, 32);
+    const int delta = dir * s.volStepsPerDetent * steps * accel;
+    pendingVolume = constrain(pendingVolume + delta, -32, 32);
+    homeToastVolume(delta);
     Serial.printf("ENC %s | det=%ld x%d\n", (dir > 0) ? "CW" : "CCW", det, accel);
   }
 

@@ -12,7 +12,7 @@ ESP32 custom mechanical keyboard with BLE HID, 6×13 matrix, rotary encoder knob
 | **Rotary encoder DT** | 19 | Quadrature B |
 | **Rotary encoder SW** | 13 | Push button (active-LOW, PULLUP) |
 | **E-Ink (GxEPD2 1.54" D67)** | CS=5 BUSY=15 RES=17 DC=16 | Static image / menu / dashboard |
-| **OLED (SSD1306 128×64)** | I2C 0x3C | Caps lock, battery, status line |
+| **OLED (SSD1306 128×64)** | I2C 0x3C | Boot splash, home screen (BT, battery, WPM graph, caps, key count, uptime), menu |
 | **I2C bus** | SDA=21 SCL=22 (default Wire) | OLED + PCF8575 |
 
 ## Matrix layout
@@ -122,6 +122,9 @@ Items: Volume step (1-4), Direction, OLED bright (0-100%, live preview),
        About (firmware, Wi-Fi, IP, Bluetooth, uptime), < Exit
 Header shows the firmware version (FW vN / FW dev).
 ```
+
+- **OLED home screen** (`oledDrawStatusLine()`): status bar (BT state, battery), body (WPM + ~2 min history graph when connected, pairing animation otherwise), footer (CAPS badge, key presses since boot, uptime h:mm). Knob actions show a ~1 s toast (`homeToast` / `homeToastVolume`). Keys/WPM refresh at 1 Hz so typing doesn't stall the scan on I2C (~23 ms per frame).
+- **Boot splash:** `initDisplay()` plays a ~0.9 s animation; `bootSplashStatus(text, pct)` updates it from `setup()` until BLE is up.
 
 - Encoder: full-cycle (4 transitions per click, rests at A=B=1). A click counts when the knob returns to rest, re-syncing every click. `-DENC_HALF_STEP` for half-cycle encoders; `-DENC_DEBUG` logs raw ticks.
 

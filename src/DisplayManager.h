@@ -13,17 +13,15 @@
 extern Adafruit_SSD1306 oled;
 extern GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> einkDisplay;
 
-void initDisplay();
-void capsLockStatus(bool on);
-void batteryStatus(int charge);
-void drawChargeTopLeft(uint8_t percent, uint8_t segments);
-void demoFourStatesRow(int y);
-void drawBattery24x8(int x, int y, uint8_t level);
-void menuDemo();
-void einkAnimateCampfireRain(uint32_t duration_ms);
+void initDisplay();                                  // OLED boot animation + E-Ink boot image
+void bootSplashStatus(const char *status, int pct);  // boot splash: status line + progress bar
 void applyOledBrightness(uint8_t percent);
 void renderIdleScreen();
-void oledDrawStatusLine();
+void oledDrawStatusLine();   // home screen; call every loop, redraws only on change
 void oledForceRedraw();
+
+// Short overlay on the home screen for knob actions.
+void homeToast(const char *text);
+void homeToastVolume(int steps);   // accumulates "VOL +N" while visible
 
 #endif

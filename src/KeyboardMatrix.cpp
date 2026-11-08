@@ -47,6 +47,7 @@ const int rowPins[numRows] = {25, 33, 12, 26, 27, 14};
 const uint8_t colPinsPCF[numColsPCF] = {P15, P13, P4, P1, P3, P7, P5, P6, P11, P0, P2, P14, P12};
 static unsigned long lastScanTime = 0;
 static unsigned long lastKeyActivityTime = 0;
+static uint32_t keyPressCount = 0;
 static KeyReport lastReport = {};
 static bool matrixReady = false;
 static bool wasConnected = false;
@@ -80,6 +81,7 @@ void scanKeyboardMatrix() {
       if (now - state.stateChangeTime >= 10 && raw != state.isPressed) {
         state.isPressed = raw;
         lastKeyActivityTime = now;
+        if (raw && keyboardLayout[row][col].usage) ++keyPressCount; // stats for the home screen
       }
       anyDown |= raw || state.isPressed;
     }
@@ -121,3 +123,4 @@ void scanKeyboardMatrix() {
 }
 
 unsigned long getLastKeyActivityTime() { return lastKeyActivityTime; }
+uint32_t getKeyPressCount() { return keyPressCount; }
