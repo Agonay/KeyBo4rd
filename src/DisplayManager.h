@@ -24,6 +24,7 @@ void renderIdleScreen();
 // partial frames while the knob works in the gaps.
 bool einkReady();
 void einkWake();
+void einkWakeKeep();   // wake without the forced first full refresh
 void einkSleep();
 void einkAcquireBus();
 void einkReleaseBus();

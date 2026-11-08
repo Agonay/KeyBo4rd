@@ -1,54 +1,51 @@
 #include "EinkAnimation.h"
+#include "EinkScene.h"
 #include "DisplayManager.h"
 #include "KeyboardMatrix.h"
 #include "RotaryEncoder.h"
 
 // ---------------------------------------------------------------------------
-// A grumpy storm cloud rains on a cat under an umbrella. The acts:
-//   1 FULL     full refresh per frame: the panel flashes black/white, ~2 s each
-//   2 PARTIAL  partial refresh of the whole screen: no flash, ~0.3-0.4 s each,
-//              ghosting slowly builds up
-//   3 WINDOW   partial refresh of the bottom strip only: everything above the
-//              dotted line freezes mid-rain. The refresh takes about as long as
-//              act 2: the waveform sets the time, not the area.
-//   4 FLASH    full refresh of an inverted frame with a bolt; the full-refresh
-//              flicker is the lightning
-//   5 CLEAN    full refresh of the normal scene, wiping the ghosting
-// then back to act 2.
+// Rainy street (EinkScene.h, made by tools/make_eink_scene.py) with small
+// changes per frame: lamp glows that flicker with the rain, fog drifting over
+// the hills, ripples in the puddles, rain streaks and the cat in the window.
 //
-// The panel stays powered (no hibernate) between frames, but SPI is released
-// after each one so GPIO18 is the knob's CLK again during the gap.
+// Smoothness comes from changing few pixels per frame and never doing a full
+// refresh while you're around:
+//   * light effects only flip pixels of the base picture, in blue-noise order
+//     (EINK_BLUE): at zero effect the picture is exactly the base, and a small
+//     change only flips a few pixels where it happens, so nothing crawls.
+//   * pausing (key/knob) only powers the panel off; resuming continues with
+//     partial refreshes. If the panel was put to deep sleep (menu, mode
+//     change), the last frame is written back into the controller's "previous"
+//     RAM so the next partial refresh is still clean.
+//   * a full refresh happens only when the scene first appears, and once after
+//     30 min of you being away (to clear ghosting).
+// SPI is released after every frame so GPIO18 is the knob's CLK in the gaps.
 // ---------------------------------------------------------------------------
 
-enum Act : uint8_t { ACT_FULL, ACT_PARTIAL, ACT_WINDOW, ACT_FLASH, ACT_CLEAN };
-
-static const char *ACT_LABEL[] = { "1 FULL", "2 PARTIAL", "3 WINDOW", "4 FLASH", "5 CLEAN" };
-
+static const int W = 200, H = 200, ROW = W / 8;
 static const unsigned long IDLE_BEFORE_START_MS = 5000;
-static const unsigned long FRAME_GAP_MS         = 150;              // knob is live in the gap
-static const unsigned long MAX_RUN_MS           = 3UL * 60UL * 1000UL;
+static const unsigned long FRAME_GAP_MS         = 150;
+static const unsigned long MAX_RUN_MS           = 30UL * 60UL * 1000UL;
 
-static const int W = 200;
-static const int SKY_TOP = 46;      // cloud bottom: rain starts here
-static const int GROUND = 160;
-static const int HUD_Y = 188;
-static const int WIN_Y = 136;       // act 3 window: y = 136..199 (includes the HUD)
-static const int UMB_X = 150, UMB_Y = 124, UMB_R = 24;
-static const int DROPS = 30;
+enum PanelState : uint8_t {
+  PANEL_UNKNOWN,   // something else is on screen: next frame needs a full refresh
+  PANEL_AWAKE,     // controller initialised, both RAMs hold `shown`
+  PANEL_ASLEEP,    // deep sleep, the screen shows `shown` (controller RAM lost)
+};
 
+static uint8_t buf[W * H / 8];
+static uint8_t shown[W * H / 8];
+static PanelState panel = PANEL_UNKNOWN;
 static bool running = false;
-static bool introDone = false;       // the 3-frame full-refresh intro plays once per selection
 static bool capped = false;
 static unsigned long cappedAt = 0;
 static unsigned long runStart = 0;
 static unsigned long lastFrameEnd = 0;
-static unsigned long lastRefreshMs = 0;
 static uint32_t frame = 0;
-static uint32_t strikes = 0;
-static Act act = ACT_FULL;
-static int actFrames = 0;
-static unsigned long actMsSum = 0;
+static uint32_t msSum = 0, msFrames = 0;
 
+// ---------- helpers ----------
 static uint32_t hash32(uint32_t x) {
   x ^= x >> 16; x *= 0x7feb352dU;
   x ^= x >> 15; x *= 0x846ca68bU;
@@ -60,234 +57,235 @@ static unsigned long lastActivity() {
   return max(getLastKeyActivityTime(), getLastKnobActivityTime());
 }
 
-static int cloudX(uint32_t f) { return 40 + (int)(38.0f * sinf(f * 0.07f)); }
+static inline bool basePx(int x, int y) {
+  return pgm_read_byte(&EINK_SCENE[y * ROW + (x >> 3)]) & (0x80 >> (x & 7));
+}
+static inline bool px(int x, int y) { return buf[y * ROW + (x >> 3)] & (0x80 >> (x & 7)); }
+static inline void setPx(int x, int y, bool white) {
+  if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H) return;
+  uint8_t &b = buf[y * ROW + (x >> 3)];
+  const uint8_t m = 0x80 >> (x & 7);
+  if (white) b |= m; else b &= ~m;
+}
+static inline uint8_t blue(int x, int y) { return pgm_read_byte(&EINK_BLUE[((y & 63) << 6) | (x & 63)]); }
 
-// y of the umbrella's top surface at column x, or -1 if x is outside it
-static int umbrellaTop(int x) {
-  int dx = x - UMB_X;
-  if (dx < -UMB_R || dx > UMB_R) return -1;
-  return UMB_Y - (int)sqrtf((float)(UMB_R * UMB_R - dx * dx));
+// Brighten by `d` (0..255): black pixels turn white in blue-noise order.
+static inline void lighten(int x, int y, int d) {
+  if (d > 0 && !px(x, y) && blue(x, y) < d) setPx(x, y, true);
 }
 
-// ---------- scene pieces ----------
-static void drawCloud(int x, uint16_t fg, uint16_t bg, bool angry) {
-  auto &d = einkDisplay;
-  d.fillCircle(x + 20, 30, 15, fg);
-  d.fillCircle(x + 46, 21, 21, fg);
-  d.fillCircle(x + 76, 25, 18, fg);
-  d.fillCircle(x + 98, 33, 12, fg);
-  d.fillRoundRect(x + 6, 28, 102, SKY_TOP - 28, 9, fg);
-  // face: eyes look down at the cat, brows frown
-  const int ey = 31;
-  d.fillCircle(x + 44, ey, 4, bg);
-  d.fillCircle(x + 66, ey, 4, bg);
-  d.fillCircle(x + 45, ey + 2, 2, fg);
-  d.fillCircle(x + 67, ey + 2, 2, fg);
-  const int lift = angry ? 3 : 0;
-  d.drawLine(x + 38, ey - 8 - lift, x + 49, ey - 5, bg);
-  d.drawLine(x + 38, ey - 7 - lift, x + 49, ey - 4, bg);
-  d.drawLine(x + 72, ey - 8 - lift, x + 61, ey - 5, bg);
-  d.drawLine(x + 72, ey - 7 - lift, x + 61, ey - 4, bg);
-  // mouth: a small frown
-  d.drawLine(x + 50, ey + 9, x + 55, ey + 7, bg);
-  d.drawLine(x + 55, ey + 7, x + 60, ey + 9, bg);
+// Draw marks in the colour that stands out against the base picture there.
+static bool contrastColour(int x, int y) {
+  int white = 0, n = 0;
+  for (int dy = -2; dy <= 2; ++dy)
+    for (int dx = -2; dx <= 2; ++dx) {
+      const int xx = x + dx, yy = y + dy;
+      if ((unsigned)xx >= (unsigned)W || (unsigned)yy >= (unsigned)H) continue;
+      white += basePx(xx, yy); ++n;
+    }
+  return white * 100 < n * 55;   // mostly dark around -> draw white
 }
 
-static void drawUmbrellaAndCat(uint32_t f, uint16_t fg, uint16_t bg) {
-  auto &d = einkDisplay;
-  // canopy: half disc with a scalloped edge
-  d.fillCircle(UMB_X, UMB_Y, UMB_R, fg);
-  d.fillRect(UMB_X - UMB_R, UMB_Y + 1, 2 * UMB_R + 1, UMB_R, bg);
-  for (int i = 0; i < 4; ++i) d.fillCircle(UMB_X - UMB_R + 6 + i * 12, UMB_Y + 2, 6, bg);
-  d.drawFastVLine(UMB_X, UMB_Y - UMB_R - 4, 4, fg);                // tip
-  for (int i = -2; i <= 2; i += 2) d.drawLine(UMB_X, UMB_Y - UMB_R + 2, UMB_X + i * 9, UMB_Y - 2, bg); // ribs
-  // handle with a J hook
-  d.drawFastVLine(UMB_X, UMB_Y, GROUND - 6 - UMB_Y, fg);
-  d.drawFastVLine(UMB_X + 1, UMB_Y, GROUND - 6 - UMB_Y, fg);
-  d.drawLine(UMB_X, GROUND - 6, UMB_X - 3, GROUND - 3, fg);
-  d.drawLine(UMB_X - 3, GROUND - 3, UMB_X - 6, GROUND - 5, fg);
+// Lamps burn steadily with a slow breathing; now and then the rain makes one dip.
+static float flicker(float t, uint32_t seed) {
+  if (hash32((uint32_t)(t * 1.5f) * 31 + seed) % 13 == 0) return 0.35f;
+  return 0.85f + 0.15f * sinf(t * 0.7f + seed);
+}
 
-  // cat sitting to the right of the handle
-  const int cx = UMB_X + 11;
-  d.fillRoundRect(cx - 6, GROUND - 14, 14, 14, 6, fg);             // body
-  d.fillCircle(cx, GROUND - 19, 6, fg);                             // head
-  d.fillTriangle(cx - 6, GROUND - 21, cx - 5, GROUND - 28, cx - 2, GROUND - 24, fg);
-  d.fillTriangle(cx + 2, GROUND - 24, cx + 5, GROUND - 28, cx + 6, GROUND - 21, fg);
-  if (f % 14 == 0) {                                                // blink
-    d.drawFastHLine(cx - 3, GROUND - 19, 2, bg);
-    d.drawFastHLine(cx + 2, GROUND - 19, 2, bg);
-  } else {
-    d.fillRect(cx - 3, GROUND - 21, 2, 3, bg);
-    d.fillRect(cx + 2, GROUND - 21, 2, 3, bg);
+// ---------- scene layers ----------
+static void drawLights(float t) {
+  // wall lamp: cone of light on the wall under the shade
+  const float f1 = flicker(t, 1);
+  for (int y = 38; y <= 70; ++y)
+    for (int x = 9; x <= 61; ++x) {
+      const float dx = (x - 35) / 26.0f, dy = (y - 40) / 30.0f, r = dx * dx + dy * dy;
+      if (r < 1) lighten(x, y, (int)(150 * f1 * (1 - r) * (1 - r)));
+    }
+  // street lamp head
+  const float f2 = flicker(t, 2);
+  for (int y = 62; y <= 86; ++y)
+    for (int x = 102; x <= 126; ++x) {
+      const float r = ((x - 114) * (x - 114) + (y - 74) * (y - 74)) / 144.0f;
+      if (r < 1) lighten(x, y, (int)(130 * f2 * (1 - r) * (1 - r)));
+    }
+  // paper lantern halo
+  const float f3 = flicker(t, 3);
+  for (int y = 57; y <= 105; ++y)
+    for (int x = 160; x < W; ++x) {
+      const float rr = sqrtf((float)((x - 184) * (x - 184) + (y - 81) * (y - 81)));
+      if (rr >= 8 && rr < 24) {
+        const float k = 1 - (rr - 8) / 16;
+        lighten(x, y, (int)(120 * f3 * k * k));
+      }
+    }
+  // fog drifting over the hills and down the far street
+  for (int y = 24; y <= 110; ++y) {
+    const float wob = 0.6f * sinf(0.13f * y + 0.1f * t);
+    const float fy = min(1.0f, (y - 24) / 10.0f) * min(1.0f, (110 - y) / 25.0f);
+    for (int x = 96; x <= 176; ++x) {
+      const float n = sinf(0.09f * x - 0.21f * t + wob)
+                    + 0.6f * sinf(0.17f * x + 0.05f * y - 0.33f * t)
+                    + 0.4f * sinf(0.05f * x - 0.07f * y - 0.11f * t);
+      if (n <= 0.2f) continue;
+      const float fx = min(1.0f, (x - 96) / 12.0f) * min(1.0f, (176 - x) / 12.0f);
+      lighten(x, y, (int)(80 * (n - 0.2f) * fx * fy));
+    }
   }
-  // tail swishes
-  const int sw = (int)(5.0f * sinf(f * 0.9f));
-  for (int t = 0; t < 2; ++t) {
-    d.drawLine(cx + 7, GROUND - 3 + t, cx + 13, GROUND - 6 + t, fg);
-    d.drawLine(cx + 13, GROUND - 6 + t, cx + 15 + sw / 2, GROUND - 14 + sw + t, fg);
+}
+
+// The cat in the bookshop window: tail swishes, an ear twitches, and now and
+// then it turns its head to you and blinks.
+static const char *const CAT_BODY[] = {
+  "..#...#.", "..##.##.", "..#####.", "..#####.", "...###..", "..#####.", ".######.",
+  ".######.", ".#######", ".#######", "########", "########", "########",
+};
+static const int8_t CAT_TAIL[4][6][2] = {
+  {{0, 9}, {0, 10}, {0, 11}, {0, 12}, {-1, -1}, {-1, -1}},   // down
+  {{0, 7}, {0, 8}, {0, 9}, {0, 10}, {1, 6}, {-1, -1}},       // half up
+  {{0, 5}, {0, 6}, {0, 7}, {0, 8}, {1, 4}, {2, 4}},          // curled up
+  {{0, 7}, {0, 8}, {0, 9}, {1, 6}, {2, 5}, {-1, -1}},
+};
+static const uint8_t CAT_TAIL_SEQ[16] = {0, 0, 0, 0, 1, 2, 2, 3, 2, 1, 0, 0, 0, 0, 0, 0};
+static const int CAT_X = 19, CAT_Y = 110;
+
+static void drawCat(uint32_t f) {
+  for (int j = 0; j < 13; ++j)
+    for (int i = 0; i < 8; ++i) setPx(CAT_X + i, CAT_Y + j, CAT_BODY[j][i] != '#');
+  const auto &tail = CAT_TAIL[CAT_TAIL_SEQ[(f / 2) % 16]];
+  for (int k = 0; k < 6 && tail[k][0] >= 0; ++k) setPx(CAT_X + tail[k][0], CAT_Y + tail[k][1], false);
+  const uint32_t p = f % 40;
+  if (p >= 24 && p < 36 && p != 30) {           // looking at you (blinks at 30)
+    setPx(CAT_X + 3, CAT_Y + 2, true);
+    setPx(CAT_X + 5, CAT_Y + 2, true);
+  }
+  if (f % 23 == 5) { setPx(CAT_X + 6, CAT_Y, true); setPx(CAT_X + 6, CAT_Y + 1, false); }   // ear twitch
+}
+
+// Ripples spread and fade in the puddles on the street.
+static void drawRipples(uint32_t f) {
+  for (int i = 0; i < 9; ++i) {
+    const uint32_t per = 6 + hash32(i * 7 + 1) % 4;
+    const uint32_t off = hash32(i * 13 + 5);
+    const uint32_t age = (f + off) % per, cyc = (f + off) / per;
+    if (age >= 5) continue;
+    const uint32_t h = hash32(i * 977 + cyc * 131);
+    const int y = 124 + h % 74;
+    const float s = (y - 120) / 79.0f;
+    const int xl = (int)(112 - 32 * s), xr = (int)(150 + 25 * s);   // street edges
+    const int x = xl + 4 + (int)((h >> 8) % max(1, xr - xl - 8));
+    const float rx = 1.5f + age * 2.0f, ry = max(1.0f, rx * 0.33f);
+    const bool col = contrastColour(x, y);
+    const int steps = (int)(rx * 6) + 8;
+    for (int k = 0; k < steps; ++k) {
+      if (age >= 3 && (k & 1)) continue;         // fading: dotted ring
+      const float a = 6.2831853f * k / steps;
+      setPx((int)lroundf(x + rx * cosf(a)), (int)lroundf(y + ry * sinf(a)), col);
+    }
   }
 }
 
-static void drawGround(uint16_t fg) {
-  auto &d = einkDisplay;
-  d.drawFastHLine(0, GROUND, W, fg);
-  d.drawFastHLine(0, GROUND + 1, W, fg);
-  // puddle shimmer
-  static const uint8_t px[] = { 8, 40, 71, 104, 180, 22, 58, 92, 128, 170 };
-  for (int i = 0; i < 10; ++i) d.drawFastHLine(px[i], GROUND + 6 + (i % 5) * 4, 10 + (i * 7) % 12, fg);
-}
-
-static void drawRain(uint32_t f, uint16_t fg) {
-  auto &d = einkDisplay;
-  const int span = GROUND - SKY_TOP;
-  const int cx = cloudX(f);
-  for (int i = 0; i < DROPS; ++i) {
+static void drawRain(uint32_t f) {
+  for (int i = 0; i < 42; ++i) {
     const uint32_t h = hash32(i * 2654435761U + 17);
-    const int off   = h % 100;
-    const int speed = 10 + (h >> 8) % 8;
-    const int len   = 7 + (h >> 12) % 8;
-    const int p     = (int)((h >> 16) % span) + (int)f * speed;
-    const int y     = SKY_TOP + p % span;
-    const int x     = cx + 8 + off - (y - SKY_TOP) / 5;               // wind blows the rain left
-
-    // splash + ripple where this drop last landed
-    const int since = (p % span) / speed;                              // frames since landing
-    const int lx = cx + 8 + off - span / 5;
-    const int ut = umbrellaTop(lx);
-    if (ut < 0 && since < 4 && f >= (uint32_t)since) {
-      const int ry = GROUND + 7 + (int)((h >> 20) % 18);
-      d.drawEllipse(lx, ry, 3 + since * 4, 1 + since, fg);
-      if (since == 0) {                                                // crown
-        d.drawLine(lx - 2, GROUND - 1, lx - 4, GROUND - 5, fg);
-        d.drawLine(lx + 2, GROUND - 1, lx + 4, GROUND - 5, fg);
-      }
+    const int x0 = (int)(h % 230) - 15;
+    const int speed = 16 + (h >> 8) % 10;
+    const int len = 4 + (h >> 12) % 5;
+    const int yb = (int)(((h >> 16) % 240 + f * speed) % 240) - 20;
+    for (int k = 0; k < len; ++k) {
+      const int y = yb - k, x = x0 + (yb - k) / 7;
+      if ((unsigned)x < (unsigned)W && (unsigned)y < (unsigned)H) setPx(x, y, contrastColour(x, y));
     }
-
-    // falling streak, stopped by the umbrella
-    const int top = umbrellaTop(x);
-    if (top >= 0 && y > top) {
-      if (y - top < speed) {                                           // just hit: bounce droplets
-        d.drawPixel(x - 3, top - 3, fg);
-        d.drawPixel(x + 3, top - 4, fg);
-        d.drawPixel(x - 5, top - 1, fg);
-      }
-      continue;
-    }
-    const int y0 = max(SKY_TOP, y - len);
-    const int dx = (y - y0) / 5;
-    d.drawLine(x, y, x + dx, y0, fg);
   }
 }
 
-static void drawBolt(uint32_t seed, int x, uint16_t fg) {
-  auto &d = einkDisplay;
-  int px = x, py = SKY_TOP - 2;
-  int seg = 0;
-  while (py < GROUND) {
-    const uint32_t h = hash32(seed * 977 + seg);
-    const int nx = constrain(px + (int)(h % 25) - 12, 4, W - 4);
-    const int ny = min(GROUND, py + 10 + (int)((h >> 8) % 10));
-    for (int t = -1; t <= 1; ++t) d.drawLine(px + t, py, nx + t, ny, fg);
-    if (seg == 2 || seg == 5) {                                        // branch
-      const int bx = nx + ((h >> 16) & 1 ? 18 : -18), by = ny + 16;
-      d.drawLine(nx, ny, bx, by, fg);
-      d.drawLine(bx, by, bx + 4, by + 9, fg);
-    }
-    px = nx; py = ny; ++seg;
-  }
-  d.fillCircle(px, GROUND, 3, fg);                                     // strike point
+static void renderScene(uint32_t f) {
+  memcpy_P(buf, EINK_SCENE, sizeof(buf));
+  const float t = f * 0.4f;     // ~0.4 s per frame on the panel
+  drawLights(t);
+  drawCat(f);
+  drawRipples(f);
+  drawRain(f);
 }
 
-static void drawHud(uint16_t fg, uint16_t bg) {
-  auto &d = einkDisplay;
-  d.fillRect(0, HUD_Y, W, W - HUD_Y, fg);
-  d.setTextSize(1);
-  d.setTextColor(bg);
-  d.setCursor(3, HUD_Y + 2);
-  d.print(ACT_LABEL[act]);
-  char buf[20];
-  snprintf(buf, sizeof(buf), "#%lu", (unsigned long)frame);
-  d.setCursor(78, HUD_Y + 2);
-  d.print(buf);
-  if (lastRefreshMs) snprintf(buf, sizeof(buf), "%lums", lastRefreshMs);
-  else               snprintf(buf, sizeof(buf), "--ms");
-  d.setCursor(W - 3 - (int)strlen(buf) * 6, HUD_Y + 2);
-  d.print(buf);
-}
-
-static void drawScene() {
-  auto &d = einkDisplay;
-  const bool flash = act == ACT_FLASH;
-  const uint16_t fg = flash ? GxEPD_WHITE : GxEPD_BLACK;
-  const uint16_t bg = flash ? GxEPD_BLACK : GxEPD_WHITE;
-  d.fillScreen(bg);
-  drawRain(frame, fg);
-  drawGround(fg);
-  drawCloud(cloudX(frame), fg, bg, flash);
-  if (flash) drawBolt(strikes, cloudX(frame) + 30 + (int)(hash32(strikes) % 50), fg);
-  drawUmbrellaAndCat(frame, fg, bg);
-  if (act == ACT_WINDOW)                                               // window edge
-    for (int x = 0; x < W; x += 4) d.drawFastHLine(x, WIN_Y, 2, fg);
-  drawHud(fg, bg);
-}
-
-// ---------- frame + act sequencing ----------
-static void renderFrame() {
+// ---------- panel I/O ----------
+static void sendFrame(bool full) {
+  auto &epd = einkDisplay.epd2;
   einkAcquireBus();
-  switch (act) {
-    case ACT_PARTIAL: einkDisplay.setPartialWindow(0, 0, W, W); break;
-    case ACT_WINDOW:  einkDisplay.setPartialWindow(0, WIN_Y, W, W - WIN_Y); break;
-    default:          einkDisplay.setFullWindow(); break;
-  }
   const unsigned long t0 = millis();
-  einkDisplay.firstPage();
-  do { drawScene(); } while (einkDisplay.nextPage());
-  lastRefreshMs = millis() - t0;
+  if (full) {
+    epd.writeImageForFullRefresh(buf, 0, 0, W, H);
+    epd.refresh(false);
+  } else {
+    epd.writeImage(buf, 0, 0, W, H);
+    epd.refresh(0, 0, W, H);                      // partial
+    epd.writeImageAgain(buf, 0, 0, W, H);
+  }
+  const unsigned long ms = millis() - t0;
   einkReleaseBus();
+  memcpy(shown, buf, sizeof(shown));
   lastFrameEnd = millis();
-  actMsSum += lastRefreshMs;
-  ++actFrames;
-  ++frame;
-}
-
-static int actLength(Act a) {
-  switch (a) {
-    case ACT_FULL:    return introDone ? 1 : 3;
-    case ACT_PARTIAL: return 25;
-    case ACT_WINDOW:  return 20;
-    default:          return 1;
+  if (!full) {
+    msSum += ms;
+    if (++msFrames == 100) {
+      Serial.printf("[EINK] rain: avg partial frame %lu ms\n", (unsigned long)(msSum / msFrames));
+      msSum = msFrames = 0;
+    }
+  } else {
+    Serial.printf("[EINK] rain: full refresh %lu ms\n", ms);
   }
 }
 
-static void nextAct() {
-  Serial.printf("[EINK] %s: %d frames, avg %lu ms\n", ACT_LABEL[act], actFrames,
-                actFrames ? actMsSum / actFrames : 0);
-  if (act == ACT_FULL) introDone = true;
-  switch (act) {
-    case ACT_FULL:    act = ACT_PARTIAL; break;
-    case ACT_PARTIAL: act = ACT_WINDOW; break;
-    case ACT_WINDOW:  act = ACT_FLASH; ++strikes; break;
-    case ACT_FLASH:   act = ACT_CLEAN; break;
-    case ACT_CLEAN:   act = ACT_PARTIAL; break;
+// Get the controller ready to continue with partial refreshes.
+// Returns true if the next frame must be a full refresh.
+static bool panelResume() {
+  switch (panel) {
+    case PANEL_AWAKE:
+      return false;
+    case PANEL_ASLEEP:
+      einkWakeKeep();                             // init without the forced full refresh
+      einkDisplay.epd2.writeImageToPrevious(shown, 0, 0, W, H);   // what's on the glass
+      einkReleaseBus();
+      panel = PANEL_AWAKE;
+      return false;
+    default:
+      einkWake();
+      einkReleaseBus();
+      panel = PANEL_AWAKE;
+      return true;
   }
-  actFrames = 0;
-  actMsSum = 0;
+}
+
+static void panelPause() {
+  if (panel != PANEL_AWAKE) return;
+  einkAcquireBus();
+  einkDisplay.epd2.powerOff();                    // keeps the RAM, no deep sleep
+  einkReleaseBus();
 }
 
 // ---------- public ----------
 bool einkAnimRunning() { return running; }
 
-void einkAnimReset() {
+void einkAnimInvalidate() {
   einkAnimStop();
-  introDone = false;
+  panel = PANEL_UNKNOWN;
   capped = false;
 }
 
 void einkAnimStop() {
-  if (!running) return;
+  if (running) Serial.println(F("[EINK] rain paused"));
   running = false;
+  if (panel == PANEL_AWAKE) {
+    einkSleep();
+    panel = PANEL_ASLEEP;
+  }
+}
+
+void einkAnimBootFrame() {
+  renderScene(frame);
+  einkWake();
+  sendFrame(true);
   einkSleep();
-  Serial.println(F("[EINK] animation stopped"));
+  panel = PANEL_ASLEEP;
 }
 
 void einkAnimTick() {
@@ -296,33 +294,35 @@ void einkAnimTick() {
   const unsigned long activity = lastActivity();
 
   if (!running) {
-    if (activity && now - activity < IDLE_BEFORE_START_MS) return;
-    if (!activity && now < IDLE_BEFORE_START_MS) return;
-    if (capped && activity <= cappedAt) return;      // wait for the user before running again
+    if (activity ? now - activity < IDLE_BEFORE_START_MS : now < IDLE_BEFORE_START_MS) return;
+    if (capped && activity <= cappedAt) return;   // you've been away: stay still until you're back
     capped = false;
     running = true;
     runStart = now;
-    act = ACT_FULL;                                   // first refresh after a wake is full anyway
-    actFrames = 0;
-    actMsSum = 0;
-    einkWake();
-    einkDisplay.setRotation(0);
-    Serial.println(F("[EINK] animation start"));
-  }
-
-  if (activity > runStart) { einkAnimStop(); return; }
-  if (now - lastFrameEnd < FRAME_GAP_MS) return;
-
-  if (now - runStart > MAX_RUN_MS) {                  // panel care: end on a clean full refresh
-    act = ACT_CLEAN;
-    renderFrame();
-    capped = true;
-    cappedAt = millis();
-    Serial.println(F("[EINK] animation time cap"));
-    einkAnimStop();
+    const bool full = panelResume();
+    renderScene(frame++);
+    sendFrame(full);
     return;
   }
 
-  renderFrame();
-  if (actFrames >= actLength(act)) nextAct();
+  if (activity > runStart) {                      // you're back: freeze on the current frame
+    running = false;
+    panelPause();
+    return;
+  }
+  if (now - lastFrameEnd < FRAME_GAP_MS) return;
+
+  if (now - runStart > MAX_RUN_MS) {              // away a long time: one clean refresh, then rest
+    renderScene(frame);
+    sendFrame(true);
+    panelPause();
+    running = false;
+    capped = true;
+    cappedAt = millis();
+    Serial.println(F("[EINK] rain: resting after 30 min"));
+    return;
+  }
+
+  renderScene(frame++);
+  sendFrame(false);
 }

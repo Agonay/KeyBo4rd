@@ -64,9 +64,21 @@ void einkReleaseBus() {
 bool einkReady() { return einkInitialized; }
 
 void einkWake() {
-  if (!einkIsAwake && einkInitialized) {
-    einkAcquireBus();
+  if (!einkInitialized) return;
+  einkAcquireBus();
+  if (!einkIsAwake) {
     einkDisplay.init(115200, true, 50, false);
+    einkIsAwake = true;
+  }
+}
+
+// Like einkWake(), but without forcing a full refresh first: for continuing with
+// partial refreshes when the caller knows what's on the glass.
+void einkWakeKeep() {
+  if (!einkInitialized) return;
+  einkAcquireBus();
+  if (!einkIsAwake) {
+    einkDisplay.init(115200, false, 50, false);
     einkIsAwake = true;
   }
 }
@@ -189,22 +201,27 @@ void initDisplay() {
   bootSplashStatus("Starting...", 20);
 #if ENABLE_EINK
   einkDisplay.epd2.setBusyCallback(serviceKeyboardDuringRefresh);
-  // E-Ink boot: show Totoro, then hibernate (encoder isn't attached yet)
+  // E-Ink boot: show the idle scene (rain or Totoro), then hibernate (encoder isn't attached yet)
   einkInitialized = true;
-  einkWake();
-  einkDisplay.setRotation(0);
-  einkDisplay.setFullWindow();
-  int x = (einkDisplay.width()  - totoro_200x200_1b_width)  / 2;
-  int y = (einkDisplay.height() - totoro_200x200_1b_height) / 2;
-  einkDisplay.firstPage();
-  do {
-    einkDisplay.fillScreen(GxEPD_WHITE);
-    einkDisplay.drawBitmap(x, y, totoro_200x200_1b, totoro_200x200_1b_width, totoro_200x200_1b_height, GxEPD_BLACK);
-  } while (einkDisplay.nextPage());
-  einkSleep();
+  if (getSettings().einkIdleMode == IdleAnimation) {
+    einkAnimBootFrame();
+    currentIdleMode = IdleAnimation;
+  } else {
+    einkWake();
+    einkDisplay.setRotation(0);
+    einkDisplay.setFullWindow();
+    int x = (einkDisplay.width()  - totoro_200x200_1b_width)  / 2;
+    int y = (einkDisplay.height() - totoro_200x200_1b_height) / 2;
+    einkDisplay.firstPage();
+    do {
+      einkDisplay.fillScreen(GxEPD_WHITE);
+      einkDisplay.drawBitmap(x, y, totoro_200x200_1b, totoro_200x200_1b_width, totoro_200x200_1b_height, GxEPD_BLACK);
+    } while (einkDisplay.nextPage());
+    einkSleep();
+    currentIdleMode = IdleTotoro;      // the panel shows Totoro now; other modes redraw on the first idle
+  }
   Serial.println(F("[EINK] boot image drawn"));
 
-  currentIdleMode = IdleTotoro;        // the panel shows Totoro now; other modes redraw on the first idle
   lastOledBrt     = getSettings().oledBrightness;
   lastDrawnSecond = 0;
 #endif
@@ -596,7 +613,7 @@ void renderIdleScreen() {
   if (mode == IdleAnimation) {
     if (currentIdleMode != IdleAnimation) {
       currentIdleMode = IdleAnimation;
-      einkAnimReset();
+      einkAnimInvalidate();
       Serial.println(F("[EINK] mode->Animation"));
     }
     einkAnimTick();
