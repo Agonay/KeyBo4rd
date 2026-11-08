@@ -8,6 +8,17 @@
 #define DT_PIN  19
 #define SW_PIN  13
 
+// This encoder is full-cycle: 4 transitions per click, always resting at A=B=1
+// (measured with -DENC_DEBUG). A click is counted when the knob settles back in
+// a rest state, and the count re-syncs there, so a dropped transition can't
+// leave it out of step. Half-cycle encoders (rest at 00 and 11): -DENC_HALF_STEP.
+#define ENC_REST_A 3
+#ifdef ENC_HALF_STEP
+#define ENC_REST_B 0
+#else
+#define ENC_REST_B 3
+#endif
+
 // ---------- quadrature decoder ----------
 DRAM_ATTR const int8_t qdec_lut[16] = {
   0, -1, +1,  0,
@@ -16,44 +27,37 @@ DRAM_ATTR const int8_t qdec_lut[16] = {
   0, +1, -1,  0
 };
 
-const uint8_t STEPS_PER_DETENT = 4;
 volatile long encoderTicks = 0;
 volatile long encoderDetents = 0;
-uint8_t       prevAB = 0;
+static volatile long detentAnchor = 0;
+uint8_t prevAB = 0;
 
-// tiny noise filter (microseconds) — the LUT self-corrects; only skip extreme chatter
-const unsigned long minEdgeUs = 100;
-static volatile unsigned long lastEdgeUs = 0;
-
+// The lookup table rejects invalid jumps and contact bounce cancels itself
+// (+1/-1), so no time filter is needed (one used to drop real edges).
 static void IRAM_ATTR encoderISR() {
-  unsigned long nowUs = micros();
-  if (nowUs - lastEdgeUs < minEdgeUs) return;
-  lastEdgeUs = nowUs;
-
-  uint8_t a = digitalRead(CLK_PIN);
-  uint8_t b = digitalRead(DT_PIN);
-  uint8_t ab = (a << 1) | b;
+  const uint8_t ab = (digitalRead(CLK_PIN) << 1) | digitalRead(DT_PIN);
   if (ab == prevAB) return;
-
-  uint8_t idx = (prevAB << 2) | ab;
-  int8_t delta = qdec_lut[idx];
-  if (delta != 0) {
-    encoderTicks += delta;
-    if (encoderTicks % STEPS_PER_DETENT == 0) {
-      long newDetents = encoderTicks / STEPS_PER_DETENT;
-      if (newDetents != encoderDetents) {
-        encoderDetents = newDetents;
-      }
-    }
-  }
+  const int8_t delta = qdec_lut[(prevAB << 2) | ab];
   prevAB = ab;
+  if (!delta) return;
+  encoderTicks += delta;
+  if (ab == ENC_REST_A || ab == ENC_REST_B) {
+    // >= 2 (not 4) so a click still counts if a transition was missed;
+    // bouncing at the rest position nets 0 and counts nothing.
+    const long d = encoderTicks - detentAnchor;
+    if (d >= 2) encoderDetents++;
+    else if (d <= -2) encoderDetents--;
+    detentAnchor = encoderTicks;
+  }
 }
 
 // ---------- button FSM (non-blocking) ----------
+static const unsigned long DOUBLE_PRESS_MS = 300;
 static unsigned long pressTime = 0;
 static bool btnDown = false;
 static bool longFired = false;
 static bool vlongFired = false;
+static unsigned long singleReleasedAt = 0;  // a short press waiting to see if a 2nd follows
 static volatile ButtonEvent pendingEvent = BTN_NONE;
 static unsigned long lastKnobActivity = 0;
 unsigned long getLastKnobActivityTime() { return lastKnobActivity; }
@@ -72,18 +76,29 @@ void handleButtonPress() {
   uint16_t vlongMs = getSettings().veryLongPressMs;
 
   if (reading && !btnDown) {
-    // fresh press
-    btnDown     = true;
-    pressTime   = now;
-    longFired   = false;
-    vlongFired  = false;
+    btnDown    = true;
+    pressTime  = now;
+    longFired  = false;
+    vlongFired = false;
   } else if (!reading && btnDown) {
-    // release
     btnDown = false;
     if (!longFired && !vlongFired) {
-      pendingEvent = BTN_SHORT;
-      Serial.println(F("[BTN] short"));
+      if (isMenuOpen()) {
+        pendingEvent = BTN_SHORT;              // menu: no double-press, react instantly
+      } else if (singleReleasedAt && now - singleReleasedAt <= DOUBLE_PRESS_MS) {
+        singleReleasedAt = 0;
+        pendingEvent = BTN_DOUBLE;
+        Serial.println(F("[BTN] double"));
+      } else {
+        singleReleasedAt = now;                // decide after the double-press window
+      }
     }
+  }
+
+  if (singleReleasedAt && !btnDown && now - singleReleasedAt > DOUBLE_PRESS_MS) {
+    singleReleasedAt = 0;
+    pendingEvent = BTN_SHORT;
+    Serial.println(F("[BTN] short"));
   }
 
   if (btnDown) {
@@ -94,6 +109,7 @@ void handleButtonPress() {
       Serial.println(F("[BTN] very-long"));
     } else if (!longFired && !vlongFired && held >= longMs) {
       longFired = true;
+      singleReleasedAt = 0;
       pendingEvent = BTN_LONG;
       Serial.println(F("[BTN] long"));
     }
@@ -106,14 +122,17 @@ ButtonEvent pollButtonEvent() {
   return ev;
 }
 
+// ---------- media keys (sent from loop, paced) ----------
 static int pendingVolume = 0;
 static bool pendingPlay = false;
+static bool pendingMute = false;
 static bool mediaDown = false;
 static unsigned long mediaAt = 0;
 static void serviceMedia() {
   if (!isConnected()) {
     pendingVolume = 0;
     pendingPlay = false;
+    pendingMute = false;
     mediaDown = false;
     return;
   }
@@ -121,6 +140,10 @@ static void serviceMedia() {
   MediaKeyReport report = {};
   if (mediaDown) {
     mediaDown = false;
+  } else if (pendingMute) {
+    report[0] = KEY_MEDIA_MUTE[0];
+    pendingMute = false;
+    mediaDown = true;
   } else if (pendingPlay) {
     report[0] = KEY_MEDIA_PLAY_PAUSE[0];
     pendingPlay = false;
@@ -134,49 +157,54 @@ static void serviceMedia() {
   mediaAt = millis();
 }
 
-// ---------- rotation drain ----------
+// Fast spinning multiplies volume steps.
+static int accelFactor(unsigned long sinceLastMs) {
+  if (sinceLastMs < 25) return 3;
+  if (sinceLastMs < 50) return 2;
+  return 1;
+}
+
+// ---------- event routing ----------
 void handleRotaryEncoder() {
   serviceMedia();
-  // button routing
+
   ButtonEvent ev = pollButtonEvent();
-  if (ev != BTN_NONE) {
-    // long press always opens/closes menu
-    if (ev == BTN_LONG) {
-      menuEventLong();
-    } else if (isMenuOpen()) {
-      switch (ev) {
-        case BTN_SHORT:     menuEventShort();     break;
-        case BTN_VERYLONG:  menuEventVeryLong();  break;
-        default: break;
-      }
-    } else {
-      switch (ev) {
-        case BTN_SHORT:
-          if (isConnected()) {
-            pendingPlay = true;
-            Serial.println(F("[BTN] media key sent"));
-          } else {
-            Serial.println(F("[BTN] BLE not connected"));
-          }
-          break;
-        case BTN_VERYLONG:
-          if (isConnected()) {
-            bleKeyboard.releaseAll();
-            Serial.println(F("[BTN] recovery: releaseAll"));
-          }
-          break;
-        default:
-          break;
-      }
+  if (ev == BTN_VERYLONG) {
+    // Recovery for stuck keys; never changes the menu (it used to close the
+    // menu the long press had just opened).
+    if (isConnected()) {
+      bleKeyboard.releaseAll();
+      Serial.println(F("[BTN] recovery: releaseAll"));
+    }
+  } else if (isMenuOpen()) {
+    if (ev == BTN_SHORT) menuEventShort();
+    else if (ev == BTN_LONG) menuEventLong();
+  } else {
+    switch (ev) {
+      case BTN_LONG:
+        menuOpen();
+        break;
+      case BTN_SHORT:
+        if (isConnected()) pendingPlay = true;
+        break;
+      case BTN_DOUBLE:
+        if (isConnected()) pendingMute = true;
+        break;
+      default:
+        break;
     }
   }
 
-  // rotation drain
+#ifdef ENC_DEBUG
+  { static long lt = 0; long t = encoderTicks; if (t != lt) { lt = t; Serial.printf("[ENCDBG] ticks=%ld det=%ld ab=%d\n", t, (long)encoderDetents, prevAB); } }
+#endif
 
   long det = encoderDetents;
   static long lastDet = 0;
+  static unsigned long lastDetAt = 0;
   if (det == lastDet) return;
-  lastKnobActivity = millis();
+  const unsigned long now = millis();
+  lastKnobActivity = now;
 
   int dir = (det > lastDet) ? +1 : -1;
   int steps = min(4, (int)abs(det - lastDet));
@@ -185,14 +213,13 @@ void handleRotaryEncoder() {
     for (int i = 0; i < steps; ++i) menuRotate(dir);
   } else if (isConnected()) {
     KbdSettings &s = getSettings();
-    uint8_t reps = s.volStepsPerDetent;
+    const int accel = accelFactor(now - lastDetAt);
     if (s.volInvertDir) dir = -dir;
-
-    pendingVolume = constrain(pendingVolume + dir * reps * steps, -32, 32);
-    Serial.printf("ENC %s | det=%ld reps=%d\n",
-      (dir > 0) ? "CW" : "CCW", det, reps);
+    pendingVolume = constrain(pendingVolume + dir * s.volStepsPerDetent * steps * accel, -32, 32);
+    Serial.printf("ENC %s | det=%ld x%d\n", (dir > 0) ? "CW" : "CCW", det, accel);
   }
 
+  lastDetAt = now;
   lastDet += (det > lastDet ? steps : -steps);
 }
 
@@ -206,5 +233,5 @@ void initRotaryEncoder() {
   attachInterrupt(digitalPinToInterrupt(CLK_PIN), encoderISR, CHANGE);
   attachInterrupt(digitalPinToInterrupt(DT_PIN),  encoderISR, CHANGE);
 
-  Serial.println(F("encoder initialized (CHANGE both pins, BLE in loop)"));
+  Serial.println(F("encoder initialized (counts on rest position)"));
 }

@@ -8,7 +8,7 @@ void initRotaryEncoder();
 void handleButtonPress();
 void handleRotaryEncoder();
 
-enum ButtonEvent { BTN_NONE, BTN_SHORT, BTN_LONG, BTN_VERYLONG };
+enum ButtonEvent { BTN_NONE, BTN_SHORT, BTN_DOUBLE, BTN_LONG, BTN_VERYLONG };
 ButtonEvent pollButtonEvent();
 unsigned long getLastKnobActivityTime();
 

@@ -48,7 +48,10 @@ jobs:
           cp "$BIN" dist/firmware.bin
           SIZE=$(stat -c %s dist/firmware.bin)
           MD5=$(md5sum dist/firmware.bin | cut -d' ' -f1)
-          printf '{"version":%s,"md5":"%s","size":%s}\n' "${{ github.run_number }}" "$MD5" "$SIZE" > dist/version.json
+          NOTES=$(git log -1 --format=%s)
+          jq -cn --argjson version "${{ github.run_number }}" --arg md5 "$MD5" \
+            --argjson size "$SIZE" --arg notes "$NOTES" \
+            '{version: $version, md5: $md5, size: $size, notes: $notes}' > dist/version.json
           cat dist/version.json
 
       - name: Publish release

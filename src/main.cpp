@@ -35,7 +35,7 @@ void loop() {
     otaLoop();
 
     // Update displays
-    oledDrawStatusLine();
+    if (!otaScreenActive()) oledDrawStatusLine();
     menuRenderIfChanged();
     renderIdleScreen();
     delay(1);

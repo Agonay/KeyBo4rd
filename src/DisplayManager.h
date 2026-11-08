@@ -24,5 +24,6 @@ void einkAnimateCampfireRain(uint32_t duration_ms);
 void applyOledBrightness(uint8_t percent);
 void renderIdleScreen();
 void oledDrawStatusLine();
+void oledForceRedraw();
 
 #endif

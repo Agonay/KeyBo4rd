@@ -23,8 +23,6 @@ struct KbdSettings {
   uint16_t veryLongPressMs;     // default 2500
 };
 
-static const int MENU_ROW_COUNT = 6;
-
 void menuInit();
 KbdSettings &getSettings();
 void saveSettings();
@@ -33,25 +31,18 @@ bool isMenuOpen();
 void menuOpen();
 void menuClose();
 
-// Call these when button events happen
-void menuEventShort();   // increment highlighted value
-void menuEventLong();    // back / close
-void menuEventVeryLong();
-
-// Rotation: scroll highlight when menu is open
+// Controls (see AGENTS.md "Menu system"):
+//   list:  turn = move, press = select/edit, hold = close
+//   edit:  turn = +/- , press = save,        hold = cancel (revert)
+void menuEventShort();
+void menuEventLong();
 void menuRotate(int dir);
 
-// Returns the current highlight index (0..MENU_ROW_COUNT-1)
-int menuHighlightIndex();
-
-// Draw the current menu screen (call from DisplayManager)
 void menuDrawEink();
 void menuDrawOled();
 
-// Only redraw if state changed; call from loop
+// Redraws on change and handles the inactivity auto-close; call from loop.
 void menuRenderIfChanged();
-
-// Force a full menu redraw (e.g. after value change)
 void menuForceRender();
 
 #endif

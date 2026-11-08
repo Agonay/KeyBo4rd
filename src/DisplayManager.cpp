@@ -160,6 +160,9 @@ void oledDrawStatusLine() {
   oled.display();
 }
 
+// Full-screen overlays (e.g. the update screen) call this to restore the status UI.
+void oledForceRedraw() { menuWasOpen = true; }
+
 void batteryStatus(int charge) {
   char buf[5];
   snprintf(buf, sizeof(buf), "%d%%", charge);

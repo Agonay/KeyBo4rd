@@ -105,36 +105,33 @@ The OS is configured **Spanish (Spain) on ANSI physical**. Characters are produc
 - BLE prints `[BLE] CapsLock: ON/OFF`.
 - Menu prints `[MENU] event=X`.
 
-### Menu system
+### Knob and menu controls
 
 ```
-Idle screen → long-press → root menu (browse mode)
-  ├─ Knob / Volume
-  │    ├─ Steps per detent (1-4)
-  │    └─ Direction (normal / inverted)
-  ├─ Display
-  │    ├─ OLED brightness (0-100%)
-  │    └─ E-Ink idle mode
-  ├─ Idle screen
-  │    ├─ Totoro (default)
-  │    ├─ Status dashboard
-  │    ├─ Animation
-  │    └─ Clock (runtime)
-  └─ Battery & power
-       ├─ Show battery
-       └─ Low-battery threshold
+Outside the menu:  turn = volume (spin fast = 2x/3x steps)
+                   press = play/pause   double-press = mute
+                   hold (0.8 s) = open menu   hold 2.5 s = releaseAll (stuck-key recovery)
 
-Browse mode: rotate → scroll options; short → enter edit mode; long → exit menu
-Edit mode:   rotate → change value; short → done (back to browse); long → exit edit mode
-Footer shows: "S=edit L=exit" (browse) or "S=done L=exit" (edit)
+Menu list:  turn = move   press = select / edit   hold = close
+Editing:    turn right = +, turn left = -   press = save   hold = cancel (revert)
+            The edited value shows as <value>. Auto-close after 20 s without input.
+
+Items: Volume step (1-4), Direction, OLED bright (0-100%, live preview),
+       Show battery, Low battery (5-50%), Idle screen (only if ENABLE_EINK),
+       Check update (checks GitHub now, installs immediately if newer),
+       About (firmware, Wi-Fi, IP, Bluetooth, uptime), < Exit
+Header shows the firmware version (FW vN / FW dev).
 ```
+
+- Encoder: full-cycle (4 transitions per click, rests at A=B=1). A click counts when the knob returns to rest, re-syncing every click. `-DENC_HALF_STEP` for half-cycle encoders; `-DENC_DEBUG` logs raw ticks.
 
 ## Firmware updates (OTA from GitHub)
 
-- **Release flow:** a push to `master` that touches `src/**`, `platformio.ini` or `scripts/**` runs `.github/workflows/firmware.yml`. It builds with `FW_VERSION=<run number>` and publishes the release `fw-N` with `firmware.bin` and `version.json` (`{"version","md5","size"}`).
+- **Release flow:** a push to `master` that touches `src/**`, `platformio.ini` or `scripts/**` runs `.github/workflows/firmware.yml`. It builds with `FW_VERSION=<run number>` and publishes the release `fw-N` with `firmware.bin` and `version.json` (`{"version","md5","size","notes"}`; `notes` = commit title, shown on the update screen).
 - **Device side (`OtaUpdater.{h,cpp}`):**
   - `otaBootCheck()` runs before `initBluetooth()`. It joins Wi-Fi, reads `releases/latest/download/version.json`, and if the release is newer, streams `firmware.bin` into the spare OTA slot (MD5-checked) and reboots.
-  - `otaLoop()`: after 4 min idle (no keys/knob, menu closed), at most once an hour, a core-0 task checks the version while BLE stays up. If a newer one exists, it sets the NVS flag `otaPend` and the device reboots, so the download happens in the boot path.
+  - `otaLoop()`: after 4 min idle (no keys/knob, menu closed), at most once an hour, a core-0 task checks the version while BLE stays up. If a newer one exists, the OLED shows a 10 s "Installing in Ns" countdown (any key/knob postpones to the next idle window), then it stores the version in NVS (`otaPendV`) and reboots, so the download happens in the boot path.
+  - Update screen: title bar, `vA -> vB`, release notes, "Downloading x/y KB" + progress bar, "Verifying...", then "UPDATE COMPLETE" or "UPDATE FAILED" with the reason. `otaScreenActive()` keeps the status line and menu from drawing over it.
 - **Wi-Fi credentials** live in NVS (`kbd`/`wifiSsid`, `wifiPass`). To set them, hold the knob at power-on. The OLED shows the hotspot password; open `http://192.168.4.1` and fill in the Wi-Fi form. The same page has a manual `.bin` upload for recovery.
 - **Dev builds:** local builds have `FW_VERSION=0` (`scripts/fw_version.py`), which turns auto-update off, so USB-flashed test firmware is not overwritten.
 - **TLS roots:** `GithubRootCAs.h` pins the Sectigo/USERTrust (github.com), ISRG/Let's Encrypt (release-assets host) and DigiCert roots. If GitHub changes CA, update this file.

@@ -2,7 +2,7 @@
 #include "DisplayManager.h"
 #include "BluetoothHID.h"
 #include "HardwareConfig.h"
-#include "OtaUpdater.h"  // FW_VERSION
+#include "OtaUpdater.h"
 
 // ---------- persistence ----------
 static Preferences prefs;
@@ -20,6 +20,11 @@ static void loadSettings() {
   settings.longPressMs       = prefs.getUShort("longMs", 800);
   settings.veryLongPressMs   = prefs.getUShort("vlongMs", 2500);
   prefs.end();
+  // sanitize values written by older firmware
+  settings.volStepsPerDetent = constrain(settings.volStepsPerDetent, 1, 4);
+  settings.oledBrightness    = constrain(settings.oledBrightness, 0, 100);
+  settings.lowBatteryPct     = constrain(settings.lowBatteryPct, 5, 50);
+  if (settings.einkIdleMode >= IdleCount) settings.einkIdleMode = IdleTotoro;
 }
 
 void saveSettings() {
@@ -35,142 +40,178 @@ void saveSettings() {
   prefs.end();
 }
 
-// ---------- menu state ----------
-static bool menuOpen_ = false;
-static int  highlight = 0;
-static bool isEditing = false; // short press locks into edit mode
+// ---------- items ----------
+enum ItemId { IT_VOLSTEP, IT_DIR, IT_BRIGHT, IT_SHOWBAT, IT_LOWBAT, IT_IDLE,
+              IT_UPDATE, IT_ABOUT, IT_EXIT };
 
-static const char *rowLabels[MENU_ROW_COUNT] = {
-  "1. Knob steps",
-  "2. Direction",
-  "3. OLED bright",
-  "4. Idle screen",
-  "5. Show battery",
-  "6. Low bat %"
+static const ItemId items[] = {
+  IT_VOLSTEP, IT_DIR, IT_BRIGHT, IT_SHOWBAT, IT_LOWBAT,
+#if ENABLE_EINK
+  IT_IDLE,   // only meaningful with the E-Ink panel enabled
+#endif
+  IT_UPDATE, IT_ABOUT, IT_EXIT
 };
+static const int ITEM_COUNT = sizeof(items) / sizeof(items[0]);
 
-static void rowValue(int idx, char *buf, int sz) {
-  switch (idx) {
-    case 0: snprintf(buf, sz, "%d", settings.volStepsPerDetent); break;
-    case 1: snprintf(buf, sz, "%s", settings.volInvertDir ? "Inverted" : "Normal"); break;
-    case 2: snprintf(buf, sz, "%d%%", settings.oledBrightness); break;
-    case 3: {
-      switch (settings.einkIdleMode) {
-        case IdleTotoro:    snprintf(buf, sz, "Totoro"); break;
-        case IdleStatus:    snprintf(buf, sz, "Status"); break;
-        case IdleAnimation: snprintf(buf, sz, "Animation"); break;
-        case IdleClock:     snprintf(buf, sz, "Clock"); break;
-        default:            snprintf(buf, sz, "?"); break;
-      }
-      break;
-    }
-    case 4: snprintf(buf, sz, "%s", settings.showBattery ? "ON" : "OFF"); break;
-    case 5: snprintf(buf, sz, "%d%%", settings.lowBatteryPct); break;
+static const char *itemLabel(ItemId id) {
+  switch (id) {
+    case IT_VOLSTEP: return "Volume step";
+    case IT_DIR:     return "Direction";
+    case IT_BRIGHT:  return "OLED bright";
+    case IT_SHOWBAT: return "Show battery";
+    case IT_LOWBAT:  return "Low battery";
+    case IT_IDLE:    return "Idle screen";
+    case IT_UPDATE:  return "Check update";
+    case IT_ABOUT:   return "About";
+    case IT_EXIT:    return "< Exit";
+  }
+  return "?";
+}
+
+static bool isEditable(ItemId id) { return id <= IT_IDLE; }
+
+static void itemValue(ItemId id, char *buf, int sz) {
+  static const char *idleNames[IdleCount] = { "Totoro", "Status", "Animation", "Clock" };
+  switch (id) {
+    case IT_VOLSTEP: snprintf(buf, sz, "%d", settings.volStepsPerDetent); break;
+    case IT_DIR:     snprintf(buf, sz, "%s", settings.volInvertDir ? "Invert" : "Normal"); break;
+    case IT_BRIGHT:  snprintf(buf, sz, "%d%%", settings.oledBrightness); break;
+    case IT_SHOWBAT: snprintf(buf, sz, "%s", settings.showBattery ? "ON" : "OFF"); break;
+    case IT_LOWBAT:  snprintf(buf, sz, "%d%%", settings.lowBatteryPct); break;
+    case IT_IDLE:    snprintf(buf, sz, "%s", idleNames[settings.einkIdleMode]); break;
+    case IT_UPDATE:  snprintf(buf, sz, "%s", otaStatusText()); break;
+    case IT_ABOUT:   snprintf(buf, sz, ">"); break;
+    default:         buf[0] = 0; break;
   }
 }
 
-static void cycleValue(int idx) {
-  switch (idx) {
-    case 0: {
-      uint8_t v = settings.volStepsPerDetent + 1;
-      if (v > 4) v = 1;
-      settings.volStepsPerDetent = v;
+// Direction-aware change; numbers clamp at their limits instead of wrapping.
+static void adjustItem(ItemId id, int dir) {
+  switch (id) {
+    case IT_VOLSTEP:
+      settings.volStepsPerDetent = constrain(settings.volStepsPerDetent + dir, 1, 4);
       break;
-    }
-    case 1:
+    case IT_DIR:
       settings.volInvertDir = !settings.volInvertDir;
       break;
-    case 2: {
-      uint8_t v = settings.oledBrightness;
-      v = (v >= 95) ? 100 : v + 10;
-      settings.oledBrightness = v;
-      applyOledBrightness(v);
+    case IT_BRIGHT:
+      settings.oledBrightness = constrain((int)settings.oledBrightness + dir * 10, 0, 100);
+      applyOledBrightness(settings.oledBrightness);  // live preview
       break;
-    }
-    case 3:
-      settings.einkIdleMode = (MenuIdleMode)((settings.einkIdleMode + 1) % IdleCount);
-      break;
-    case 4:
+    case IT_SHOWBAT:
       settings.showBattery = !settings.showBattery;
       break;
-    case 5: {
-      uint8_t v = settings.lowBatteryPct;
-      v = (v >= 95) ? 5 : v + 5;
-      settings.lowBatteryPct = v;
+    case IT_LOWBAT:
+      settings.lowBatteryPct = constrain((int)settings.lowBatteryPct + dir * 5, 5, 50);
       break;
-    }
+    case IT_IDLE:
+      settings.einkIdleMode = (MenuIdleMode)((settings.einkIdleMode + IdleCount + dir) % IdleCount);
+      break;
+    default:
+      break;
   }
-  Serial.printf("[MENU] row%d cycled\n", idx);
 }
 
-// ---------- render flags ----------
-static bool needsRender = false;
-static int  lastHighlight = -1;
-static bool lastEditing = false;
+// ---------- state ----------
+static const unsigned long AUTO_CLOSE_MS = 20000;
+static const int VISIBLE_ROWS = 5;
 
-static void markDirty() { needsRender = true; }
+static bool menuOpen_ = false;
+static int  highlight = 0;
+static int  scrollTop = 0;
+static bool isEditing = false;
+static bool aboutOpen = false;
+static KbdSettings editBackup;
+static unsigned long lastInputAt = 0;
+static bool needsRender = false;
+static String lastOtaStatus;
+
+static void markDirty() { needsRender = true; lastInputAt = millis(); }
 
 // ---------- OLED drawing ----------
-void menuDrawOled() {
-  char buf[20];
-  oled.clearDisplay();
-  oled.setTextSize(1);
+static void drawHeader(const char *title) {
   oled.setTextColor(SSD1306_WHITE);
-
-  // header
   oled.setCursor(2, 1);
-  oled.print(F("MENU"));
-  // firmware version, right-aligned in the header
+  oled.print(title);
   char fw[12];
   if (FW_VERSION == 0) snprintf(fw, sizeof(fw), "FW dev");
   else snprintf(fw, sizeof(fw), "FW v%d", FW_VERSION);
   oled.setCursor(126 - (int)strlen(fw) * 6, 1);
   oled.print(fw);
   oled.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+}
 
-  // 6 rows: rows 0..5, each 8px tall, starting at y=12
+static void drawFooter(const char *hint) {
+  oled.drawFastHLine(0, 54, 128, SSD1306_WHITE);
+  oled.setCursor(2, 56);
+  oled.print(hint);
+}
+
+static void drawAbout() {
+  drawHeader("ABOUT");
+  char line[24];
   int y = 12;
-  int lineH = 8;
-  for (int i = 0; i < MENU_ROW_COUNT; i++) {
-    rowValue(i, buf, sizeof(buf));
-    bool hl = (i == highlight);
+  auto row = [&](const char *text) { oled.setCursor(2, y); oled.print(text); y += 8; };
+  if (FW_VERSION == 0) row("Firmware: dev build");
+  else { snprintf(line, sizeof(line), "Firmware: v%d", FW_VERSION); row(line); }
+  String ssid = otaSavedSsid();
+  snprintf(line, sizeof(line), "WiFi: %.15s", ssid.length() ? ssid.c_str() : "not set");
+  row(line);
+  snprintf(line, sizeof(line), "IP: %.17s", otaLastIp());
+  row(line);
+  snprintf(line, sizeof(line), "Bluetooth: %s", bleKeyboard.isConnected() ? "connected" : "waiting");
+  row(line);
+  const unsigned long m = millis() / 60000;
+  snprintf(line, sizeof(line), "Uptime: %luh %02lum", m / 60, m % 60);
+  row(line);
+  drawFooter("Press: back");
+}
 
-    // abbreviated label for OLED
-    const char *shortLabel;
-    switch (i) {
-      case 0: shortLabel = "Knob steps"; break;
-      case 1: shortLabel = "Direction";   break;
-      case 2: shortLabel = "OLED brt";    break;
-      case 3: shortLabel = "Idle screen"; break;
-      case 4: shortLabel = "Battery";     break;
-      case 5: shortLabel = "Low bat %";   break;
-      default: shortLabel = rowLabels[i]; break;
-    }
+void menuDrawOled() {
+  char val[18];
+  char text[22];
+  oled.clearDisplay();
+  oled.setTextSize(1);
 
+  if (aboutOpen) { drawAbout(); oled.display(); return; }
+
+  drawHeader("MENU");
+
+  // keep the highlight inside the visible window
+  if (highlight < scrollTop) scrollTop = highlight;
+  if (highlight >= scrollTop + VISIBLE_ROWS) scrollTop = highlight - VISIBLE_ROWS + 1;
+
+  for (int r = 0; r < VISIBLE_ROWS && scrollTop + r < ITEM_COUNT; r++) {
+    const int i = scrollTop + r;
+    const ItemId id = items[i];
+    const bool hl = (i == highlight);
+    const int y = 11 + r * 8;
+    itemValue(id, val, sizeof(val));
+    if (hl && isEditing) snprintf(text, sizeof(text), "%-11s<%s>", itemLabel(id), val);
+    else                 snprintf(text, sizeof(text), "%-12s%s", itemLabel(id), val);
     if (hl) {
-      oled.fillRect(0, y, 128, lineH, SSD1306_WHITE);
+      oled.fillRect(0, y, 123, 8, SSD1306_WHITE);
       oled.setTextColor(SSD1306_BLACK);
+    } else {
+      oled.setTextColor(SSD1306_WHITE);
     }
+    oled.setCursor(2, y);
+    oled.print(text);
+  }
+  oled.setTextColor(SSD1306_WHITE);
 
-    // compact layout: "Label: value"
-    char line[22];
-    snprintf(line, sizeof(line), "%-11s%s", shortLabel, buf);
-    oled.setCursor(2, y + 1);
-    oled.print(line);
-
-    oled.setTextColor(SSD1306_WHITE);
-    y += lineH;
+  // scrollbar
+  if (ITEM_COUNT > VISIBLE_ROWS) {
+    const int trackH = VISIBLE_ROWS * 8;
+    const int thumbH = max(4, trackH * VISIBLE_ROWS / ITEM_COUNT);
+    const int thumbY = 11 + (trackH - thumbH) * scrollTop / (ITEM_COUNT - VISIBLE_ROWS);
+    oled.fillRect(125, thumbY, 2, thumbH, SSD1306_WHITE);
   }
 
-  // footer
-  oled.drawFastHLine(0, 60, 128, SSD1306_WHITE);
-  oled.setCursor(2, 61);
-  if (isEditing) {
-    oled.print(F("S=done L=exit"));
-  } else {
-    oled.print(F("S=edit L=exit"));
-  }
-
+  const ItemId cur = items[highlight];
+  if (isEditing)              drawFooter("Turn:adjust Press:OK");
+  else if (isEditable(cur))   drawFooter("Turn:move Press:edit");
+  else                        drawFooter("Turn:move Press:go");
   oled.display();
 }
 
@@ -186,31 +227,23 @@ void menuDrawEink() {
     einkDisplay.fillScreen(GxEPD_WHITE);
     einkDisplay.setTextSize(1);
     einkDisplay.setTextColor(GxEPD_BLACK);
-
     einkDisplay.setCursor(10, 10);
-    einkDisplay.print(F("MENU — rotate to scroll, short to change"));
+    einkDisplay.print(F("MENU"));
     einkDisplay.drawFastHLine(10, 18, 180, GxEPD_BLACK);
-
     int y = 30;
-    int lineH = 20;
-    for (int i = 0; i < MENU_ROW_COUNT; i++) {
-      rowValue(i, buf, sizeof(buf));
-      bool hl = (i == highlight);
-      if (hl) {
-        einkDisplay.fillRect(6, y - 8, 188, lineH + 2, GxEPD_BLACK);
+    for (int i = 0; i < ITEM_COUNT; i++) {
+      itemValue(items[i], buf, sizeof(buf));
+      if (i == highlight) {
+        einkDisplay.fillRect(6, y - 8, 188, 16, GxEPD_BLACK);
         einkDisplay.setTextColor(GxEPD_WHITE);
       }
       einkDisplay.setCursor(10, y);
-      einkDisplay.print(rowLabels[i]);
+      einkDisplay.print(itemLabel(items[i]));
       einkDisplay.print(F(": "));
       einkDisplay.print(buf);
       einkDisplay.setTextColor(GxEPD_BLACK);
-      y += lineH;
+      y += 16;
     }
-
-    einkDisplay.drawFastHLine(10, 170, 180, GxEPD_BLACK);
-    einkDisplay.setCursor(10, 176);
-    einkDisplay.print(F("Short=change  Long=close"));
   } while (einkDisplay.nextPage());
   einkDisplay.hibernate();
 #endif
@@ -218,8 +251,6 @@ void menuDrawEink() {
 
 // ---------- public ----------
 KbdSettings &getSettings() { return settings; }
-int menuHighlightIndex() { return highlight; }
-
 bool isMenuOpen() { return menuOpen_; }
 
 void menuInit() {
@@ -231,85 +262,90 @@ void menuInit() {
 void menuOpen() {
   menuOpen_ = true;
   highlight = 0;
+  scrollTop = 0;
+  isEditing = false;
+  aboutOpen = false;
   markDirty();
   Serial.println(F("[MENU] open"));
 }
 
 void menuClose() {
+  if (isEditing) {           // closing mid-edit keeps the edited value
+    isEditing = false;
+  }
   saveSettings();
   menuOpen_ = false;
-  isEditing = false;
+  aboutOpen = false;
   Serial.println(F("[MENU] close"));
 }
 
-void menuForceRender() {
-  needsRender = true;
-}
+void menuForceRender() { needsRender = true; }
 
 void menuEventShort() {
   if (!menuOpen_) return;
+  if (aboutOpen) { aboutOpen = false; markDirty(); return; }
+  const ItemId id = items[highlight];
   if (isEditing) {
+    isEditing = false;       // save
     saveSettings();
-    // Exit edit mode, back to browse
-    isEditing = false;
-    markDirty();
-    Serial.printf("[MENU] exit edit mode, highlight=%d\n", highlight);
-  } else {
-    // Enter edit mode for current row
+    Serial.printf("[MENU] saved %s\n", itemLabel(id));
+  } else if (isEditable(id)) {
     isEditing = true;
-    cycleValue(highlight); // apply first change immediately
-    markDirty();
-    Serial.printf("[MENU] enter edit mode, row=%d\n", highlight);
+    editBackup = settings;
+    Serial.printf("[MENU] editing %s\n", itemLabel(id));
+  } else if (id == IT_UPDATE) {
+    otaCheckNow();
+  } else if (id == IT_ABOUT) {
+    aboutOpen = true;
+  } else if (id == IT_EXIT) {
+    menuClose();
+    return;
   }
+  markDirty();
 }
 
 void menuEventLong() {
-  if (isEditing) {
-    saveSettings();
-    // Exit edit mode first
+  if (!menuOpen_) return;
+  if (aboutOpen) { aboutOpen = false; markDirty(); return; }
+  if (isEditing) {           // cancel: restore the value from before editing
+    settings = editBackup;
+    applyOledBrightness(settings.oledBrightness);
     isEditing = false;
+    Serial.println(F("[MENU] edit cancelled"));
     markDirty();
-    Serial.println(F("[MENU] exit edit mode (long)"));
-    return;
-  }
-  if (!menuOpen_) {
-    menuOpen();
     return;
   }
   menuClose();
 }
 
-void menuEventVeryLong() {
-  if (menuOpen_) {
-    menuClose();
-    return;
-  }
-  Serial.println(F("[MENU] very-long on idle"));
-}
-
 void menuRotate(int dir) {
   if (!menuOpen_) return;
+  if (aboutOpen) return;
   if (isEditing) {
-    // In edit mode: rotate changes the value
-    cycleValue(highlight);
+    adjustItem(items[highlight], dir);
   } else {
-    // In browse mode: rotate scrolls through options
-    highlight = (highlight + dir + MENU_ROW_COUNT) % MENU_ROW_COUNT;
-    Serial.printf("[MENU] highlight=%d\n", highlight);
+    highlight = constrain(highlight + dir, 0, ITEM_COUNT - 1);
   }
   markDirty();
 }
 
 void menuRenderIfChanged() {
-  if (!menuOpen_) {
-    needsRender = false;
-    lastHighlight = -1;
-    lastEditing = false;
+  if (!menuOpen_) { needsRender = false; return; }
+  if (otaScreenActive()) return;  // the update screen owns the OLED
+
+  const unsigned long now = millis();
+  if (now - lastInputAt > AUTO_CLOSE_MS) {
+    Serial.println(F("[MENU] auto-close"));
+    menuClose();
     return;
   }
-  if (!needsRender && highlight == lastHighlight && isEditing == lastEditing) return;
-  menuDrawOled();
-  lastHighlight = highlight;
-  lastEditing = isEditing;
+  // live values: update-check status and the About screen
+  const String st = otaStatusText();
+  if (st != lastOtaStatus) { lastOtaStatus = st; needsRender = true; }
+  static unsigned long lastAboutDraw = 0;
+  if (aboutOpen && now - lastAboutDraw > 1000) { lastAboutDraw = now; needsRender = true; }
+
+  if (!needsRender) return;
   needsRender = false;
+  menuDrawOled();
 }
