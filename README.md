@@ -6,7 +6,7 @@ ESP32 Dev Module, 4 MB flash, Spanish (Spain) host layout. See AGENTS.md for mat
 
 Install PlatformIO, then run `pio run`. Connect USB and run `pio run -t upload` for the **first installation of this version**. This installs the OTA-capable partition table as well as the firmware. Do not install this first version through an older updater with a different partition table. Settings in the `kbd` NVS namespace are retained by ordinary uploads (do not erase flash).
 
-Build output: `.pio/build/esp32dev/firmware.bin`. The two application slots each hold 1,966,080 bytes. PlatformIO checks that the image fits. The ESP32 platform is pinned to the verified version; library version ranges remain compatible with the existing dependency cache.
+Build output: `.pio/build/esp32dev/firmware.bin`. The two application slots each hold 2,031,616 bytes (`partitions.csv`: `min_spiffs` without SPIFFS). PlatformIO checks that the image fits. OTA never rewrites the partition table: a keyboard only gets the larger slots after one USB upload, and keyboards still on the old table (1,966,080-byte slots) reject images larger than that. The ESP32 platform is pinned to the verified version; library version ranges remain compatible with the existing dependency cache.
 
 ## Subsequent browser updates
 
