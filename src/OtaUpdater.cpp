@@ -8,6 +8,7 @@
 #include "DisplayManager.h"
 #include "KeyboardMatrix.h"
 #include "RotaryEncoder.h"
+#include "IdleConfig.h"
 #include "MenuManager.h"
 #include "BluetoothHID.h"
 
@@ -15,7 +16,7 @@
 static const char *MANIFEST_URL =
   "https://github.com/" OTA_REPO "/releases/latest/download/version.json";
 
-static const unsigned long IDLE_BEFORE_CHECK_MS = 4UL * 60UL * 1000UL;
+static const unsigned long IDLE_BEFORE_CHECK_MS = KEYBOARD_IDLE_MS;
 static const unsigned long MIN_CHECK_INTERVAL_MS = 60UL * 60UL * 1000UL;
 static const unsigned long CHECK_COUNTDOWN_MS = 10UL * 1000UL;
 static const char *NS = "kbd";

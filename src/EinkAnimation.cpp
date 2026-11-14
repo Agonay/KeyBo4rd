@@ -3,6 +3,7 @@
 #include "DisplayManager.h"
 #include "KeyboardMatrix.h"
 #include "RotaryEncoder.h"
+#include "IdleConfig.h"
 
 // ---------------------------------------------------------------------------
 // Rainy street (EinkScene.h, made by tools/make_eink_scene.py) with small
@@ -24,7 +25,7 @@
 // ---------------------------------------------------------------------------
 
 static const int W = 200, H = 200, ROW = W / 8;
-static const unsigned long IDLE_BEFORE_START_MS = 5000;
+static const unsigned long IDLE_BEFORE_START_MS = KEYBOARD_IDLE_MS;
 static const unsigned long FRAME_GAP_MS         = 150;
 static const unsigned long MAX_RUN_MS           = 30UL * 60UL * 1000UL;
 
