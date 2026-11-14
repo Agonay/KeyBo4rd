@@ -10,6 +10,12 @@ static volatile uint8_t leds = 0;
 static bool wasConnected = false;
 static unsigned long connectedAt = 0;
 static volatile int disconnectReason = -1;
+static volatile uint16_t connHandle = 0xFFFF;  // BLE_HS_CONN_HANDLE_NONE
+
+// RSSI of the link as the keyboard hears the laptop, sampled once a second.
+static int8_t rssiLast = 0, rssiMin = 0;
+static int32_t rssiSum = 0;
+static uint16_t rssiCount = 0;
 
 class Keyboard : public BleKeyboard {
 public:
@@ -20,6 +26,7 @@ public:
   }
   // NimBLE calls both overloads; the one-argument one (base) sets `connected`.
   void onConnect(NimBLEServer* server, ble_gap_conn_desc* desc) override {
+    connHandle = desc->conn_handle;
     // 15-30 ms interval, no slave latency, 6 s supervision timeout.
     server->updateConnParams(desc->conn_handle, 12, 24, 0, 600);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_CONN_HDL0);
@@ -78,3 +85,49 @@ uint16_t bleSendableCount() {
   return bleKeyboard.isConnected() ? ble_hs_hci_avail_pkts : 0;
 }
 bool bleCanSend() { return bleSendableCount() > 0; }
+
+static int8_t rssiHist[RSSI_HISTORY_LEN];
+static uint16_t rssiHistHead = 0;   // next write slot
+static bool rssiHistInit = false;
+
+static void pushHistory(int8_t v) {
+  if (!rssiHistInit) {
+    for (auto &h : rssiHist) h = RSSI_NONE;
+    rssiHistInit = true;
+  }
+  rssiHist[rssiHistHead] = v;
+  rssiHistHead = (rssiHistHead + 1) % RSSI_HISTORY_LEN;
+}
+
+void bleSampleRssi(unsigned long now) {
+  static unsigned long lastSample = 0;
+  if (now - lastSample < 1000) return;
+  lastSample = now;
+  int8_t rssi;
+  // One HCI command (~1 ms); 127 means the controller has no reading.
+  if (!bleKeyboard.isConnected() || connHandle == 0xFFFF ||
+      ble_gap_conn_rssi(connHandle, &rssi) != 0 || rssi == 127) {
+    pushHistory(RSSI_NONE);  // gap in the graph = no link
+    return;
+  }
+  pushHistory(rssi);
+  rssiLast = rssi;
+  if (rssiCount == 0 || rssi < rssiMin) rssiMin = rssi;
+  rssiSum += rssi;
+  ++rssiCount;
+}
+
+int8_t bleRssiHistory(int i) {
+  if (!rssiHistInit || i < 0 || i >= RSSI_HISTORY_LEN) return RSSI_NONE;
+  return rssiHist[(rssiHistHead + i) % RSSI_HISTORY_LEN];
+}
+
+bool bleTakeRssiStats(int8_t& last, int8_t& minimum, int8_t& average) {
+  if (rssiCount == 0) return false;
+  last = rssiLast;
+  minimum = rssiMin;
+  average = (int8_t)(rssiSum / rssiCount);
+  rssiSum = 0;
+  rssiCount = 0;
+  return true;
+}

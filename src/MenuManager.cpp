@@ -45,14 +45,14 @@ void saveSettings() {
 
 // ---------- items ----------
 enum ItemId { IT_VOLSTEP, IT_DIR, IT_BRIGHT, IT_SHOWBAT, IT_LOWBAT, IT_IDLE,
-              IT_UPDATE, IT_ABOUT, IT_EXIT };
+              IT_RSSI, IT_UPDATE, IT_ABOUT, IT_EXIT };
 
 static const ItemId items[] = {
   IT_VOLSTEP, IT_DIR, IT_BRIGHT, IT_SHOWBAT, IT_LOWBAT,
 #if ENABLE_EINK
   IT_IDLE,   // only meaningful with the E-Ink panel enabled
 #endif
-  IT_UPDATE, IT_ABOUT, IT_EXIT
+  IT_RSSI, IT_UPDATE, IT_ABOUT, IT_EXIT
 };
 static const int ITEM_COUNT = sizeof(items) / sizeof(items[0]);
 
@@ -64,6 +64,7 @@ static const char *itemLabel(ItemId id) {
     case IT_SHOWBAT: return "Show battery";
     case IT_LOWBAT:  return "Low battery";
     case IT_IDLE:    return "Idle screen";
+    case IT_RSSI:    return "RSSI monitor";
     case IT_UPDATE:  return "Check update";
     case IT_ABOUT:   return "About";
     case IT_EXIT:    return "< Exit";
@@ -83,6 +84,7 @@ static void itemValue(ItemId id, char *buf, int sz) {
     case IT_LOWBAT:  snprintf(buf, sz, "%d%%", settings.lowBatteryPct); break;
     case IT_IDLE:    snprintf(buf, sz, "%s", idleNames[settings.einkIdleMode]); break;
     case IT_UPDATE:  snprintf(buf, sz, "%s", otaStatusText()); break;
+    case IT_RSSI:    snprintf(buf, sz, ">"); break;
     case IT_ABOUT:   snprintf(buf, sz, ">"); break;
     default:         buf[0] = 0; break;
   }
@@ -128,6 +130,7 @@ static int  highlight = 0;
 static int  scrollTop = 0;
 static bool isEditing = false;
 static bool aboutOpen = false;
+static bool rssiOpen = false;   // RSSI monitor; stays open (no auto-close) until pressed
 static KbdSettings editBackup;
 static unsigned long lastInputAt = 0;
 static bool needsRender = false;
@@ -174,6 +177,60 @@ static void drawAbout() {
   drawFooter("Press: back");
 }
 
+// Signal strength the keyboard hears from the laptop: big live value, quality,
+// worst value in the window, and a 2-minute graph (gaps = no connection).
+static const char *rssiQuality(int8_t r) {
+  if (r == RSSI_NONE) return "NO LINK";
+  if (r >= -60) return "STRONG";
+  if (r >= -70) return "GOOD";
+  if (r >= -80) return "WEAK";
+  return "BAD";
+}
+
+static void drawRssi() {
+  drawHeader("RSSI");
+  const int8_t now = bleRssiHistory(RSSI_HISTORY_LEN - 1);
+  int8_t worst = 0;
+  bool any = false;
+  for (int i = 0; i < RSSI_HISTORY_LEN; i++) {
+    const int8_t v = bleRssiHistory(i);
+    if (v == RSSI_NONE) continue;
+    if (!any || v < worst) worst = v;
+    any = true;
+  }
+  char buf[16];
+  oled.setTextSize(2);
+  oled.setCursor(2, 12);
+  if (now == RSSI_NONE) oled.print("--");
+  else { snprintf(buf, sizeof(buf), "%d", now); oled.print(buf); }
+  oled.setTextSize(1);
+  oled.setCursor(oled.getCursorX() + 2, 19);
+  oled.print("dBm");
+  const char *q = rssiQuality(now);
+  oled.setCursor(126 - (int)strlen(q) * 6, 12);
+  oled.print(q);
+  if (any) snprintf(buf, sizeof(buf), "min %d", worst);
+  else snprintf(buf, sizeof(buf), "min --");
+  oled.setCursor(126 - (int)strlen(buf) * 6, 21);
+  oled.print(buf);
+
+  // graph: -100 dBm at the bottom, -40 at the top; dotted line at -80 (trouble)
+  const int gx = 4, gy = 30, gh = 23;
+  auto yOf = [&](int r) { r = constrain(r, -100, -40); return gy + gh - 1 - (r + 100) * (gh - 1) / 60; };
+  const int y80 = yOf(-80);
+  for (int x = gx; x < gx + RSSI_HISTORY_LEN; x += 3) oled.drawPixel(x, y80, SSD1306_WHITE);
+  int prevY = -1;
+  for (int i = 0; i < RSSI_HISTORY_LEN; i++) {
+    const int8_t v = bleRssiHistory(i);
+    if (v == RSSI_NONE) { prevY = -1; continue; }
+    const int y = yOf(v);
+    if (prevY < 0) oled.drawPixel(gx + i, y, SSD1306_WHITE);
+    else oled.drawLine(gx + i - 1, prevY, gx + i, y, SSD1306_WHITE);
+    prevY = y;
+  }
+  drawFooter("dots -80   Press:back");
+}
+
 void menuDrawOled() {
   char val[18];
   char text[22];
@@ -181,6 +238,7 @@ void menuDrawOled() {
   oled.setTextSize(1);
 
   if (aboutOpen) { drawAbout(); oled.display(); return; }
+  if (rssiOpen)  { drawRssi();  oled.display(); return; }
 
   drawHeader("MENU");
 
@@ -238,6 +296,7 @@ void menuOpen() {
   scrollTop = 0;
   isEditing = false;
   aboutOpen = false;
+  rssiOpen = false;
   markDirty();
   Serial.println(F("[MENU] open"));
 }
@@ -249,6 +308,7 @@ void menuClose() {
   saveSettings();
   menuOpen_ = false;
   aboutOpen = false;
+  rssiOpen = false;
   Serial.println(F("[MENU] close"));
 }
 
@@ -256,7 +316,7 @@ void menuForceRender() { needsRender = true; }
 
 void menuEventShort() {
   if (!menuOpen_) return;
-  if (aboutOpen) { aboutOpen = false; markDirty(); return; }
+  if (aboutOpen || rssiOpen) { aboutOpen = rssiOpen = false; markDirty(); return; }
   const ItemId id = items[highlight];
   if (isEditing) {
     isEditing = false;       // save
@@ -268,6 +328,8 @@ void menuEventShort() {
     Serial.printf("[MENU] editing %s\n", itemLabel(id));
   } else if (id == IT_UPDATE) {
     otaCheckNow();
+  } else if (id == IT_RSSI) {
+    rssiOpen = true;
   } else if (id == IT_ABOUT) {
     aboutOpen = true;
   } else if (id == IT_EXIT) {
@@ -279,7 +341,7 @@ void menuEventShort() {
 
 void menuEventLong() {
   if (!menuOpen_) return;
-  if (aboutOpen) { aboutOpen = false; markDirty(); return; }
+  if (aboutOpen || rssiOpen) { aboutOpen = rssiOpen = false; markDirty(); return; }
   if (isEditing) {           // cancel: restore the value from before editing
     settings = editBackup;
     applyOledBrightness(settings.oledBrightness);
@@ -293,7 +355,7 @@ void menuEventLong() {
 
 void menuRotate(int dir) {
   if (!menuOpen_) return;
-  if (aboutOpen) return;
+  if (aboutOpen || rssiOpen) return;
   if (isEditing) {
     adjustItem(items[highlight], dir);
   } else {
@@ -307,7 +369,7 @@ void menuRenderIfChanged() {
   if (otaScreenActive()) return;  // the update screen owns the OLED
 
   const unsigned long now = millis();
-  if (now - lastInputAt > AUTO_CLOSE_MS) {
+  if (!rssiOpen && now - lastInputAt > AUTO_CLOSE_MS) {
     Serial.println(F("[MENU] auto-close"));
     menuClose();
     return;
@@ -316,7 +378,7 @@ void menuRenderIfChanged() {
   const String st = otaStatusText();
   if (st != lastOtaStatus) { lastOtaStatus = st; needsRender = true; }
   static unsigned long lastAboutDraw = 0;
-  if (aboutOpen && now - lastAboutDraw > 1000) { lastAboutDraw = now; needsRender = true; }
+  if ((aboutOpen || rssiOpen) && now - lastAboutDraw > 1000) { lastAboutDraw = now; needsRender = true; }
 
   if (!needsRender) return;
   needsRender = false;

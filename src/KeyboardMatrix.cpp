@@ -106,9 +106,13 @@ static void logLinkStats(unsigned long now) {
   static unsigned long lastLog = 0;
   if (now - lastLog < 10000) return;
   lastLog = now;
-  Serial.printf("[BLE] heap=%u minHeap=%u sendable=%u q=%u maxQ=%u maxWait=%lums "
+  char rssiText[40] = "rssi=n/a";
+  int8_t rLast, rMin, rAvg;
+  if (bleTakeRssiStats(rLast, rMin, rAvg))
+    snprintf(rssiText, sizeof(rssiText), "rssi=%d min=%d avg=%d", rLast, rMin, rAvg);
+  Serial.printf("[BLE] %s heap=%u minHeap=%u sendable=%u q=%u maxQ=%u maxWait=%lums "
                 "maxScanGap=%lums collapsed=%lu keys=%lu\n",
-                ESP.getFreeHeap(), ESP.getMinFreeHeap(), bleSendableCount(), qCount, maxQ,
+                rssiText, ESP.getFreeHeap(), ESP.getMinFreeHeap(), bleSendableCount(), qCount, maxQ,
                 maxWait, maxScanGap, (unsigned long)qCollapsed, (unsigned long)keyPressCount);
   maxQ = 0; maxWait = 0; maxScanGap = 0;
 }

@@ -35,6 +35,7 @@ void loop() {
     if (firmwareUpdateActive()) { handleFirmwareUpdate(); return; }
     // Poll BLE connection to detect reconnect edges (triggers releaseAll)
     isConnected();
+    bleSampleRssi(millis());  // 1 Hz; feeds the serial log and the menu RSSI monitor
 
     scanKeyboardMatrix();
     handleButtonPress();

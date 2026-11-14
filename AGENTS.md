@@ -95,7 +95,8 @@ The OS is configured **Spanish (Spain) on ANSI physical**. Characters are produc
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Key spams endlessly on Windows | BLE disconnected while key held → latched report; no release on reconnect. | Guard with `isConnected()`, call `releaseAll()` on reconnect edge, forced release after 2 s. |
-| Lag builds up while typing, key sticks ~2 s then repeats, BLE drops | BLE notifications don't block; reports sent faster than the link piled up inside the stack. | Reports go through a 16-entry queue in `KeyboardMatrix.cpp`, sent only when `bleCanSend()` (NimBLE host's free controller ACL buffers, `ble_hs_hci_avail_pkts`). Serial logs `[BLE] heap/sendable/q` every 10 s. |
+| Lag builds up while typing, key sticks ~2 s then repeats, BLE drops | BLE notifications don't block; reports sent faster than the link piled up inside the stack. | Reports go through a 16-entry queue in `KeyboardMatrix.cpp`, sent only when `bleCanSend()` (NimBLE host's free controller ACL buffers, `ble_hs_hci_avail_pkts`). Serial logs `[BLE] rssi/heap/sendable/q` every 10 s (RSSI sampled 1/s: last, min, avg dBm). |
+| Stutter/stuck keys only with the laptop lid closed | Laptop BT antenna is in the lid; a closed lid blocks it and weak signal drops key-release reports. | Check `rssi=` in the serial log; use a USB BT dongle on an extension near the keyboard, keep the ESP32 antenna clear of PCB/plate/displays. |
 | Knob misses volume steps at fast rotation | ISR level-triggered (`LOW`), 1 ms debounce drops transitions, BLE called inside ISR. | ISR fires `CHANGE` on both pins, tiny filter, BLE in loop only. |
 | Spanish chars wrong | `BleKeyboard.press(char)` uses US ASCII map; Spanish-only chars (`ñ ¿ ¡ º`) not in map. | Use Spanish(ES)-on-ANSI layout table with physical HID codes. |
 | E-Ink ghosting / stutter | Full refresh every frame. | Use partial updates + dirty-cooldown. |
@@ -123,6 +124,7 @@ Editing:    turn right = +, turn left = -   press = save   hold = cancel (revert
 
 Items: Volume step (1-4), Direction, OLED bright (0-100%, live preview),
        Show battery, Low battery (5-50%), Idle screen (Totoro/Status/Animation),
+       RSSI monitor (live link dBm + quality, min, 2 min graph, dotted line at -80; no auto-close),
        Check update (checks GitHub now, installs immediately if newer),
        About (firmware, Wi-Fi, IP, Bluetooth, uptime), < Exit
 Header shows the firmware version (FW vN / FW dev).
@@ -156,4 +158,5 @@ Header shows the firmware version (FW vN / FW dev).
 - **TLS roots:** `GithubRootCAs.h` pins the Sectigo/USERTrust (github.com), ISRG/Let's Encrypt (release-assets host) and DigiCert roots. If GitHub changes CA, update this file.
 - **E-Ink / knob pin sharing:** the E-Ink SCK and the encoder CLK are both wired to GPIO18. `einkWake()` suspends the encoder interrupts and attaches SPI; `einkSleep()` hibernates the panel, calls `SPI.end()` and resumes the encoder. The knob doesn't respond during a refresh (~2-3 s), so idle redraws wait 3 s after the last key/knob input, and Clock mode is disabled. Moving the E-Ink SCK wire to a free GPIO and setting `EINK_SCK` (`HardwareConfig.h`) removes the sharing.
 - **E-Ink "Animation" idle mode (`EinkAnimation.{h,cpp}`, `EinkScene.h`):** a rainy street drawn from a picture by `tools/make_eink_scene.py <png>`. The script makes a 200x200 Atkinson-dithered base plus a 64x64 blue-noise table. Every frame is a partial refresh. Light effects (lamp flicker, lantern halo, drifting fog) only turn black base pixels white, in blue-noise order, so small changes stay local and don't crawl. On top of that it draws rain streaks, puddle ripples and the cat sprite in the window. It starts 5 s after the last key/knob input. Input pauses it with `powerOff()`, which keeps the controller RAM, so resuming is another partial refresh. After a deep sleep (menu, mode change) the last frame is written back with `writeImageToPrevious()` before continuing (`einkWakeKeep()` skips the forced first full refresh). Full refreshes happen only when the scene first appears (boot draws it directly when this mode is selected) and once after 30 min away. SPI is released after each frame, so the knob works in the 150 ms gaps.
-- **No automatic rollback:** a release that crashes at boot needs a USB reflash. Flash usage is ~67% of the 1.9 MB OTA slot (was ~95% before NimBLE).
+- **No automatic rollback:** a release that crashes at boot needs a USB reflash. Flash usage is ~65% of the 1.94 MB OTA slot (was ~95% before NimBLE).
+- **Partitions (`partitions.csv`):** nvs, otadata, two 0x1F0000 app slots, coredump; no SPIFFS (nothing uses it; settings are NVS). OTA can't change the partition table, so a keyboard keeps the old `min_spiffs` layout (0x1E0000 slots) until a USB upload. Keep images under 1,966,080 B while any keyboard may still be on the old table.
